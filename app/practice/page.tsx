@@ -1,730 +1,558 @@
-// app/practice/page.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { supabaseClient } from "@/lib/supabaseClient";
-import type { QuestionAnalysisV1, StatementVerdict, SourceRef } from "@/lib/aiAnalysis";
-import { normalizeQuestionAnalysisV1 } from "@/lib/aiAnalysis";
+import type { QuestionAnalysisV1 } from "@/lib/aiAnalysis";
 
-/* ---------- Question row from Supabase ---------- */
 type QuestionRow = {
   id: number;
   year: number | null;
   subject: string | null;
-  question_number: number | null;
   question_text: string;
-
-  option_a: string | null;
-  option_b: string | null;
-  option_c: string | null;
-  option_d: string | null;
-  correct_option: string | null;
+  option_a: string;
+  option_b: string;
+  option_c: string;
+  option_d: string;
+  correct_option?: "A" | "B" | "C" | "D";
 };
 
-type ProfileRow = {
-  id: string;
-  email: string | null;
-  full_name: string | null;
-  phone: string | null;
-  state_of_preparation: string | null;
-  upsc_attempts: number | null;
-};
+type TabKey = "solution" | "strategy";
+
+function clsx(...xs: Array<string | false | null | undefined>) {
+  return xs.filter(Boolean).join(" ");
+}
+
+function Badge({
+  tone,
+  children,
+}: {
+  tone: "green" | "red" | "gray" | "blue";
+  children: React.ReactNode;
+}) {
+  const map = {
+    green: "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+    red: "border-rose-500/30 bg-rose-500/10 text-rose-200",
+    gray: "border-white/10 bg-white/5 text-white/70",
+    blue: "border-cyan-500/30 bg-cyan-500/10 text-cyan-200",
+  } as const;
+  return (
+    <span
+      className={clsx(
+        "inline-flex items-center rounded-full border px-2 py-1 text-xs font-medium",
+        map[tone]
+      )}
+    >
+      {children}
+    </span>
+  );
+}
 
 export default function PracticePage() {
   const router = useRouter();
+  const supabase = supabaseClient;
 
-  // auth + profile gate
-  const [authChecked, setAuthChecked] = useState(false);
+  const [userId, setUserId] = useState<string | null>(null);
 
-  // data
-  const [allQuestions, setAllQuestions] = useState<QuestionRow[]>([]);
-  const [loadingQuestion, setLoadingQuestion] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [questions, setQuestions] = useState<QuestionRow[]>([]);
+  const [loadingQuestions, setLoadingQuestions] = useState(true);
 
-  // filters
   const [yearFilter, setYearFilter] = useState<string>("All");
   const [subjectFilter, setSubjectFilter] = useState<string>("All");
 
-  // navigation on filtered list
-  const [questionIndex, setQuestionIndex] = useState(0);
+  const [index, setIndex] = useState(0);
+  const [selected, setSelected] = useState<"A" | "B" | "C" | "D" | null>(null);
 
-  // attempt + analysis
-  const [selected, setSelected] = useState<string | null>(null);
-  const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
   const [analysis, setAnalysis] = useState<QuestionAnalysisV1 | null>(null);
-  const [loadingAnalysis, setLoadingAnalysis] = useState(false);
+  const [activeTab, setActiveTab] = useState<TabKey>("solution");
 
-  const PRACTICE_PATH = "/practice";
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const isProfileComplete = (p: ProfileRow | null) => {
-    if (!p) return false;
-    const fullNameOk = !!p.full_name && p.full_name.trim().length >= 2;
-    const phoneOk = !!p.phone && p.phone.trim().length >= 8; // loose check
-    const stateOk = !!p.state_of_preparation && p.state_of_preparation.trim().length >= 2;
-    const attemptsOk = typeof p.upsc_attempts === "number" && p.upsc_attempts >= 0;
-    return fullNameOk && phoneOk && stateOk && attemptsOk;
-  };
-
-  /* ======================================================
-     AUTH + ONBOARDING GUARD (MUST RUN FIRST)
-     ====================================================== */
+  // --- Auth gate
   useEffect(() => {
-    let alive = true;
-
-    const goLogin = () => router.replace(`/login?redirect=${encodeURIComponent(PRACTICE_PATH)}`);
-    const goOnboarding = () =>
-      router.replace(`/onboarding?redirect=${encodeURIComponent(PRACTICE_PATH)}`);
-
-    const checkAuthAndProfile = async () => {
-      try {
-        const { data: sessionData } = await supabaseClient.auth.getSession();
-        const session = sessionData.session;
-
-        if (!session) {
-          goLogin();
-          return;
-        }
-
-        // Get user (reliable id + email)
-        const { data: userData, error: userErr } = await supabaseClient.auth.getUser();
-        if (userErr || !userData.user) {
-          goLogin();
-          return;
-        }
-
-        const userId = userData.user.id;
-        const email = userData.user.email ?? null;
-
-        // Fetch profile
-        const { data: profile, error: profileErr } = await supabaseClient
-          .from("profiles")
-          .select("id,email,full_name,phone,state_of_preparation,upsc_attempts")
-          .eq("id", userId)
-          .maybeSingle();
-
-        // If profile row doesn't exist yet, create a minimal one
-        if (!profile && !profileErr) {
-          const { error: insertErr } = await supabaseClient.from("profiles").insert({
-            id: userId,
-            email,
-          });
-          if (insertErr) {
-            console.error("profiles insert error:", insertErr);
-            // If insert fails due to RLS/mismatch, force onboarding anyway
-            goOnboarding();
-            return;
-          }
-          goOnboarding();
-          return;
-        }
-
-        if (profileErr) {
-          console.error("profiles select error:", profileErr);
-          // If we cannot read profile due to RLS/config, send to onboarding (it will reveal the issue quickly)
-          goOnboarding();
-          return;
-        }
-
-        if (!isProfileComplete(profile as ProfileRow)) {
-          goOnboarding();
-          return;
-        }
-
-        if (alive) setAuthChecked(true);
-      } catch (e) {
-        console.error(e);
-        goLogin();
+    (async () => {
+      const { data, error } = await supabase.auth.getUser();
+      if (error || !data?.user) {
+        router.replace("/login");
+        return;
       }
-    };
+      setUserId(data.user.id);
+    })();
+  }, [router, supabase]);
 
-    checkAuthAndProfile();
-
-    // If user logs out in another tab, kick them out
-    const { data: sub } = supabaseClient.auth.onAuthStateChange((_event, session) => {
-      if (!session) router.replace(`/login?redirect=${encodeURIComponent(PRACTICE_PATH)}`);
-    });
-
-    return () => {
-      alive = false;
-      sub?.subscription?.unsubscribe();
-    };
-  }, [router]);
-
-  /* ======================================================
-     LOAD QUESTIONS (ONLY AFTER AUTH + PROFILE CHECK)
-     ====================================================== */
+  // --- Load questions
   useEffect(() => {
-    if (!authChecked) return;
-
-    const loadQuestions = async () => {
-      setError(null);
-      setLoadingQuestion(true);
-
+    (async () => {
       try {
-        const { data, error } = await supabaseClient
+        setLoadingQuestions(true);
+        setError(null);
+
+        const { data, error } = await supabase
           .from("questions")
-          .select("*")
-          .order("id", { ascending: true });
+          .select(
+            "id, year, subject, question_text, option_a, option_b, option_c, option_d, correct_option"
+          )
+          .order("id", { ascending: true })
+          .limit(200);
 
-        if (error || !data || data.length === 0) {
-          console.error("Error fetching questions:", error);
-          setError("Failed to load questions from Supabase.");
-          return;
-        }
-
-        setAllQuestions(data as QuestionRow[]);
-        setQuestionIndex(0);
-      } catch (err) {
-        console.error("Unexpected error fetching questions:", err);
-        setError("Unexpected error while loading questions.");
+        if (error) throw error;
+        setQuestions((data ?? []) as QuestionRow[]);
+      } catch (e: any) {
+        setError(e?.message ?? "Failed to load questions");
       } finally {
-        setLoadingQuestion(false);
+        setLoadingQuestions(false);
       }
-    };
+    })();
+  }, [supabase]);
 
-    loadQuestions();
-  }, [authChecked]);
-
+  // --- Filters + derived list
   const years = useMemo(() => {
-    const ys = Array.from(
-      new Set(allQuestions.map((q) => q.year).filter((x): x is number => !!x))
-    ).sort((a, b) => b - a);
-    return ys;
-  }, [allQuestions]);
+    const ys = new Set<string>();
+    for (const q of questions) if (q.year) ys.add(String(q.year));
+    return ["All", ...Array.from(ys).sort((a, b) => Number(b) - Number(a))];
+  }, [questions]);
 
   const subjects = useMemo(() => {
-    const ss = Array.from(
-      new Set(
-        allQuestions
-          .map((q) => q.subject?.trim())
-          .filter((x): x is string => !!x && x.length > 0)
-      )
-    ).sort((a, b) => a.localeCompare(b));
-    return ss;
-  }, [allQuestions]);
+    const ss = new Set<string>();
+    for (const q of questions) if (q.subject) ss.add(q.subject);
+    return ["All", ...Array.from(ss).sort()];
+  }, [questions]);
 
-  const filteredQuestions = useMemo(() => {
-    return allQuestions.filter((q) => {
-      const yearOk = yearFilter === "All" ? true : String(q.year ?? "") === yearFilter;
-      const subjectOk =
-        subjectFilter === "All" ? true : (q.subject ?? "").trim() === subjectFilter;
-      return yearOk && subjectOk;
+  const filtered = useMemo(() => {
+    return questions.filter((q) => {
+      const yOk = yearFilter === "All" || String(q.year ?? "") === yearFilter;
+      const sOk = subjectFilter === "All" || (q.subject ?? "") === subjectFilter;
+      return yOk && sOk;
     });
-  }, [allQuestions, yearFilter, subjectFilter]);
+  }, [questions, subjectFilter, yearFilter]);
 
-  // keep index valid when filters change
+  const current = filtered[index] ?? null;
+
+  // Reset per-question state when changing question/filters
   useEffect(() => {
-    setQuestionIndex(0);
     setSelected(null);
-    setIsCorrect(null);
     setAnalysis(null);
+    setActiveTab("solution");
     setError(null);
-  }, [yearFilter, subjectFilter]);
+  }, [index, yearFilter, subjectFilter]);
 
-  const question = filteredQuestions[questionIndex] ?? null;
+  // Keep index in bounds when filters change
+  useEffect(() => {
+    if (index >= filtered.length) setIndex(0);
+  }, [filtered.length, index]);
 
-  const currentOptions =
-    question != null
-      ? [
-          { key: "A", label: question.option_a ?? "" },
-          { key: "B", label: question.option_b ?? "" },
-          { key: "C", label: question.option_c ?? "" },
-          { key: "D", label: question.option_d ?? "" },
-        ].filter((opt) => opt.label.trim().length > 0)
-      : [];
-
-  const correctKey = question?.correct_option?.trim().toUpperCase() ?? null;
-
-  const resetAttemptState = () => {
-    setSelected(null);
-    setIsCorrect(null);
-    setAnalysis(null);
-    setError(null);
-  };
-
-  const handlePrev = () => {
-    if (questionIndex <= 0) return;
-    setQuestionIndex((i) => i - 1);
-    resetAttemptState();
-  };
-
-  const handleNext = () => {
-    if (questionIndex >= filteredQuestions.length - 1) return;
-    setQuestionIndex((i) => i + 1);
-    resetAttemptState();
-  };
-
-  const handleLogout = async () => {
-    await supabaseClient.auth.signOut();
-    router.replace(`/login?redirect=${encodeURIComponent(PRACTICE_PATH)}`);
-  };
-
-  // When user clicks “Check & Generate Analysis”
-  const handleCheckAndAnalyse = async () => {
-    setError(null);
-    setAnalysis(null);
-    setIsCorrect(null);
-
-    if (!question) {
-      setError("Question not loaded yet.");
-      return;
-    }
-    if (!selected) {
-      setError("Please choose an option first.");
-      return;
-    }
-    if (!correctKey) {
-      setError("Correct option is not set for this question.");
-      return;
-    }
-
-    setIsCorrect(selected === correctKey);
-
-    try {
-      setLoadingAnalysis(true);
-      const res = await fetch(`/test-ai?questionId=${question.id}`);
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
-
-      const raw = await res.json();
-      const normalized = normalizeQuestionAnalysisV1(raw);
-      setAnalysis(normalized);
-    } catch (err) {
-      console.error("Failed to fetch AI analysis:", err);
-      setError("Failed to fetch AI analysis. Please try again.");
-    } finally {
-      setLoadingAnalysis(false);
-    }
-  };
-
-  // While auth/profile is being checked, keep it quiet (prevents flash)
-  if (!authChecked) {
-    return (
-      <main className="min-h-screen bg-slate-950 text-slate-50 px-6 py-10">
-        <div className="max-w-4xl mx-auto text-sm text-slate-400">
-          Checking session & profile…
-        </div>
-      </main>
-    );
+  async function insertAttempt(payload: {
+    user_id: string;
+    question_id: number;
+    selected_option: "A" | "B" | "C" | "D";
+    is_correct: boolean;
+  }) {
+    // Don’t block UI if insert fails; just log
+    const { error } = await supabase.from("question_attempts").insert(payload);
+    if (error) console.warn("question_attempts insert error:", error.message);
   }
 
+  async function handleGenerate() {
+    if (!current) return;
+    if (!selected) {
+      setError("Select an option first.");
+      return;
+    }
+
+    try {
+      setChecking(true);
+      setError(null);
+
+      const res = await fetch(`/test-ai?questionId=${current.id}`, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j?.error ?? `Failed: ${res.status}`);
+      }
+
+      const payload = (await res.json()) as QuestionAnalysisV1;
+      setAnalysis(payload);
+
+      // attempt logging (optional)
+      if (userId) {
+        const isCorrect = payload.correct_answer === selected;
+        await insertAttempt({
+          user_id: userId,
+          question_id: current.id,
+          selected_option: selected,
+          is_correct: isCorrect,
+        });
+      }
+    } catch (e: any) {
+      setError(e?.message ?? "Failed to generate analysis");
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  function goPrev() {
+    setIndex((x) => Math.max(0, x - 1));
+  }
+  function goNext() {
+    setIndex((x) => Math.min(filtered.length - 1, x + 1));
+  }
+
+  const selectedLabel = selected ?? "—";
+
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-50 px-6 py-10">
-      <div className="max-w-4xl mx-auto space-y-6">
-        <header className="flex items-center justify-between gap-4">
+    <div className="min-h-screen bg-gradient-to-b from-[#050A1A] via-[#040817] to-[#030613] text-white">
+      <div className="mx-auto max-w-5xl px-4 py-10">
+        {/* Header */}
+        <div className="mb-6 flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl md:text-3xl font-semibold">UPSC Practice</h1>
-            <p className="text-sm text-slate-400 mt-1">
-              Practice PYQs → check answer → see explanation.
+            <h1 className="text-3xl font-semibold tracking-tight">UPSC Practice</h1>
+            <p className="mt-1 text-sm text-white/60">
+              Practice PYQs → check answer → see explanation
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleCheckAndAnalyse}
-              disabled={loadingAnalysis || loadingQuestion || !question}
-              className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
-            >
-              {loadingAnalysis ? "Generating..." : "Check & Generate Analysis"}
-            </button>
-
-            <button
-              onClick={handleLogout}
-              className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
-              type="button"
-            >
-              Logout
-            </button>
-          </div>
-        </header>
-
-        {/* Filters row */}
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <span className="text-xs uppercase tracking-wide text-slate-400">Year</span>
-              <select
-                value={yearFilter}
-                onChange={(e) => setYearFilter(e.target.value)}
-                className="bg-slate-950/60 border border-slate-700 rounded-md px-3 py-2 text-sm"
-              >
-                <option value="All">All</option>
-                {years.map((y) => (
-                  <option key={y} value={String(y)}>
-                    {y}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <span className="text-xs uppercase tracking-wide text-slate-400">Subject</span>
-              <select
-                value={subjectFilter}
-                onChange={(e) => setSubjectFilter(e.target.value)}
-                className="bg-slate-950/60 border border-slate-700 rounded-md px-3 py-2 text-sm"
-              >
-                <option value="All">All</option>
-                {subjects.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div className="text-xs text-slate-400">
-            Showing{" "}
-            <span className="text-slate-200 font-semibold">{filteredQuestions.length}</span>{" "}
-            of{" "}
-            <span className="text-slate-200 font-semibold">{allQuestions.length}</span>{" "}
-            questions
-          </div>
-        </section>
-
-        {/* Navigation */}
-        <div className="flex items-center justify-between gap-4">
+          {/* IMPORTANT: type="button" + not covered by overlay */}
           <button
-            onClick={handlePrev}
-            disabled={loadingQuestion || questionIndex <= 0}
-            className="rounded-md bg-slate-900 border border-slate-700 px-3 py-1 text-xs md:text-sm disabled:opacity-40"
+            type="button"
+            onClick={handleGenerate}
+            disabled={!current || !selected || checking}
+            className={clsx(
+              "rounded-xl px-5 py-2.5 text-sm font-semibold shadow",
+              "border border-emerald-400/30 bg-emerald-500/20 text-emerald-100",
+              "hover:bg-emerald-500/30 active:scale-[0.99]",
+              "disabled:cursor-not-allowed disabled:opacity-50"
+            )}
           >
-            ← Previous
-          </button>
-
-          <p className="text-xs text-slate-400">
-            {filteredQuestions.length > 0
-              ? `Question ${questionIndex + 1} of ${filteredQuestions.length}`
-              : "No questions in this filter"}
-          </p>
-
-          <button
-            onClick={handleNext}
-            disabled={loadingQuestion || questionIndex >= filteredQuestions.length - 1}
-            className="rounded-md bg-slate-900 border border-slate-700 px-3 py-1 text-xs md:text-sm disabled:opacity-40"
-          >
-            Next →
+            {checking ? "Generating..." : "Check & Generate Analysis"}
           </button>
         </div>
 
-        {/* Question card */}
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5 space-y-4">
-          {loadingQuestion && (
-            <p className="text-sm text-slate-400">Loading questions from Supabase…</p>
-          )}
-
-          {!loadingQuestion && question && (
-            <>
-              <div className="text-xs font-semibold uppercase tracking-wide text-emerald-400 flex flex-wrap gap-2">
-                {question.subject && <span>{question.subject}</span>}
-                {question.year && <span>• {question.year}</span>}
-                {question.question_number && <span>• Q{question.question_number}</span>}
+        {/* Filters + Prev/Next row (as you want) */}
+        <div className="mb-6 rounded-2xl border border-white/10 bg-white/5 p-4 backdrop-blur">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-white/60">YEAR</span>
+                <select
+                  value={yearFilter}
+                  onChange={(e) => setYearFilter(e.target.value)}
+                  className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm outline-none"
+                >
+                  {years.map((y) => (
+                    <option key={y} value={y}>
+                      {y}
+                    </option>
+                  ))}
+                </select>
               </div>
 
-              <pre className="whitespace-pre-wrap text-sm leading-relaxed text-slate-100">
-                {question.question_text}
-              </pre>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-white/60">SUBJECT</span>
+                <select
+                  value={subjectFilter}
+                  onChange={(e) => setSubjectFilter(e.target.value)}
+                  className="min-w-[220px] rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm outline-none"
+                >
+                  {subjects.map((s) => (
+                    <option key={s} value={s}>
+                      {s}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="ml-1 text-xs text-white/50">
+                Showing{" "}
+                <span className="font-semibold text-white/70">
+                  {filtered.length}
+                </span>{" "}
+                of{" "}
+                <span className="font-semibold text-white/70">{questions.length}</span>{" "}
+                questions
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={goPrev}
+                disabled={index <= 0}
+                className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10 disabled:opacity-40"
+              >
+                ← Previous
+              </button>
+              <button
+                type="button"
+                onClick={goNext}
+                disabled={index >= filtered.length - 1}
+                className="rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm hover:bg-white/10 disabled:opacity-40"
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Main card */}
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-6 backdrop-blur">
+          {loadingQuestions ? (
+            <div className="text-white/70">Loading questions…</div>
+          ) : !current ? (
+            <div className="text-white/70">No questions match these filters.</div>
+          ) : (
+            <>
+              <div className="mb-4 flex items-center justify-between gap-3">
+                <div className="text-xs text-white/60">
+                  {current.subject ?? "—"} • {current.year ?? "—"} • Q{current.id}
+                </div>
+                <div className="text-xs text-white/50">
+                  Question {filtered.length ? index + 1 : 0} of {filtered.length}
+                </div>
+              </div>
+
+              <div className="whitespace-pre-line rounded-xl border border-white/10 bg-black/20 p-4 text-sm leading-6 text-white/85">
+                {current.question_text}
+              </div>
 
               <div className="mt-4 space-y-2">
-                {currentOptions.map((opt) => (
+                {(
+                  [
+                    ["A", current.option_a],
+                    ["B", current.option_b],
+                    ["C", current.option_c],
+                    ["D", current.option_d],
+                  ] as const
+                ).map(([key, label]) => (
                   <button
-                    key={opt.key}
+                    key={key}
                     type="button"
-                    onClick={() => setSelected(opt.key)}
-                    className={`flex w-full items-center justify-between rounded-lg border px-3 py-2 text-sm transition ${
-                      selected === opt.key
-                        ? "border-emerald-400 bg-emerald-500/10"
-                        : "border-slate-700 bg-slate-900 hover:border-slate-500"
-                    }`}
+                    onClick={() => setSelected(key)}
+                    className={clsx(
+                      "w-full rounded-xl border px-4 py-3 text-left text-sm",
+                      "transition",
+                      selected === key
+                        ? "border-emerald-400/50 bg-emerald-500/10"
+                        : "border-white/10 bg-white/5 hover:bg-white/10"
+                    )}
                   >
-                    <span className="flex items-center gap-2">
-                      <span className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-slate-500 text-xs font-semibold">
-                        {opt.key}
-                      </span>
-                      <span>{opt.label}</span>
+                    <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-white/10 bg-black/20 text-xs">
+                      {key}
                     </span>
+                    {label}
                   </button>
                 ))}
               </div>
 
-              {isCorrect !== null && correctKey && (
-                <div
-                  className={`mt-3 rounded-lg px-3 py-2 text-sm ${
-                    isCorrect
-                      ? "bg-emerald-500/10 text-emerald-300 border border-emerald-500/40"
-                      : "bg-rose-500/10 text-rose-300 border border-rose-500/40"
-                  }`}
-                >
-                  {isCorrect
-                    ? `✅ Correct! The right option is ${correctKey}.`
-                    : `❌ Not quite. The correct option is ${correctKey}.`}
+              {error && (
+                <div className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-100">
+                  {error}
                 </div>
               )}
 
-              {error && <p className="mt-2 text-sm text-rose-400">{error}</p>}
+              {/* Answer correctness line */}
+              {analysis && (
+                <div className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">
+                  ✅ Correct answer is <b>{analysis.correct_answer}</b>. You selected{" "}
+                  <b>{selectedLabel}</b>.
+                </div>
+              )}
             </>
           )}
+        </div>
 
-          {!loadingQuestion && !question && !error && (
-            <p className="text-sm text-rose-400">No question found for this filter.</p>
-          )}
-        </section>
-
-        {/* AI analysis tabs */}
-        {analysis && <AnalysisTabs analysis={analysis} />}
-      </div>
-    </main>
-  );
-}
-
-/* ======================================================
-   Analysis Tabs
-   ====================================================== */
-
-type AnalysisTabsProps = {
-  analysis: QuestionAnalysisV1;
-};
-
-function AnalysisTabs({ analysis }: AnalysisTabsProps) {
-  const [activeTab, setActiveTab] = useState<"solution" | "strategy">("solution");
-
-  const tabBase = "px-4 py-2 text-sm rounded-md border transition-colors";
-  const tabActive = "bg-emerald-500 text-slate-950 border-emerald-500";
-  const tabInactive =
-    "bg-slate-900 text-slate-300 border-slate-600 hover:bg-slate-800";
-
-  const verdictColor = (v: StatementVerdict) => {
-    if (v === "correct")
-      return "bg-emerald-900 text-emerald-200 border-emerald-600";
-    if (v === "incorrect") return "bg-rose-900 text-rose-200 border-rose-600";
-    return "bg-amber-900 text-amber-100 border-amber-500";
-  };
-
-  const topicTitle = analysis?.topic_brief?.title ?? "Topic Brief";
-  const topicBullets = analysis?.topic_brief?.bullets ?? [];
-
-  return (
-    <section className="space-y-4">
-      <div className="flex gap-2 border-b border-slate-700 pb-2">
-        <button
-          type="button"
-          onClick={() => setActiveTab("solution")}
-          className={`${tabBase} ${activeTab === "solution" ? tabActive : tabInactive}`}
-        >
-          Solution &amp; Explanation
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveTab("strategy")}
-          className={`${tabBase} ${activeTab === "strategy" ? tabActive : tabInactive}`}
-        >
-          Exam Strategy
-        </button>
-      </div>
-
-      {activeTab === "solution" ? (
-        <div className="space-y-4">
-          <div className="rounded-xl border border-emerald-600 bg-emerald-950/40 px-4 py-3 text-sm text-emerald-100">
-            <div className="font-semibold uppercase tracking-wide text-emerald-300 text-xs">
-              Correct Answer
-            </div>
-            <div className="mt-1 text-lg font-bold">Option {analysis.correct_answer}</div>
-          </div>
-
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 space-y-2">
-            <div className="text-sm font-semibold text-slate-200">
-              Topic Brief — {topicTitle}
-            </div>
-
-            <ul className="mt-2 space-y-2 text-sm text-slate-200">
-              {topicBullets.map((t, idx) => (
-                <li
-                  key={idx}
-                  className="rounded-lg border border-slate-700 bg-slate-950/40 p-3 text-sm text-slate-100"
+        {/* Analysis */}
+        {analysis && (
+          <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-6 backdrop-blur">
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <div>
+                <div className="text-lg font-semibold">Solution & Guidance</div>
+                <div className="text-sm text-white/60">
+                  Clean UI view of the generated analysis (no raw JSON).
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("solution")}
+                  className={clsx(
+                    "rounded-xl border px-4 py-2 text-sm",
+                    activeTab === "solution"
+                      ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-100"
+                      : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"
+                  )}
                 >
-                  {t}
-                </li>
-              ))}
-
-              {topicBullets.length === 0 && (
-                <li className="text-sm text-slate-400">Topic brief not available.</li>
-              )}
-            </ul>
-          </div>
-
-          <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 space-y-3">
-            <div className="text-sm font-semibold text-slate-200">
-              Statement-wise Analysis
+                  Solution & Explanation
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("strategy")}
+                  className={clsx(
+                    "rounded-xl border px-4 py-2 text-sm",
+                    activeTab === "strategy"
+                      ? "border-emerald-400/40 bg-emerald-500/10 text-emerald-100"
+                      : "border-white/10 bg-white/5 text-white/70 hover:bg-white/10"
+                  )}
+                >
+                  Exam Strategy
+                </button>
+              </div>
             </div>
 
-            {analysis.statements.map((s, idx) => (
-              <div
-                key={idx}
-                className="rounded-lg border border-slate-700 bg-slate-950/40 p-3 space-y-2"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <p className="text-sm text-slate-100">Statement {s.id}</p>
-                  <span
-                    className={`ml-2 inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${verdictColor(
-                      s.verdict
-                    )}`}
-                  >
-                    {s.verdict}
-                  </span>
+            {activeTab === "solution" ? (
+              <div className="space-y-5">
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                  <div className="mb-2 text-xs text-white/60">CORRECT ANSWER</div>
+                  <div className="text-2xl font-semibold">{analysis.correct_answer}</div>
                 </div>
 
-                <ul className="mt-2 space-y-2">
-                  {s.facts.map((f, j) => (
-                    <li
-                      key={j}
-                      className="rounded-md border border-slate-700 bg-slate-900/40 p-3"
-                    >
-                      <div className="text-sm text-slate-100">{f.fact}</div>
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                  <div className="mb-2 text-xs text-white/60">TOPIC BRIEF</div>
+                  <div className="text-lg font-semibold">
+                    {analysis.topic_brief?.title ?? "—"}
+                  </div>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-white/80">
+                    {(analysis.topic_brief?.bullets ?? []).map((b, i) => (
+                      <li key={i}>{b}</li>
+                    ))}
+                  </ul>
+                </div>
 
-                      {f.example && f.example.trim().length > 0 && (
-                        <div className="mt-1 text-xs text-slate-300">
-                          <span className="font-semibold text-slate-200">Example:</span>{" "}
-                          {f.example}
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                  <div className="mb-3 text-xs text-white/60">STATEMENT-WISE BREAKDOWN</div>
+
+                  <div className="space-y-3">
+                    {(analysis.statements ?? []).map((s, i) => {
+                      const verdict = s.verdict ?? "unknown";
+                      const tone =
+                        verdict === "correct"
+                          ? "green"
+                          : verdict === "incorrect"
+                          ? "red"
+                          : "gray";
+
+                      return (
+                        <div
+                          key={i}
+                          className="rounded-xl border border-white/10 bg-white/5 p-4"
+                        >
+                          <div className="mb-2 flex items-center justify-between gap-3">
+                            <div className="font-semibold">Statement {s.id ?? i + 1}</div>
+                            <Badge tone={tone}>
+                              {verdict === "correct"
+                                ? "CORRECT"
+                                : verdict === "incorrect"
+                                ? "INCORRECT"
+                                : "UNKNOWN"}
+                            </Badge>
+                          </div>
+
+                          <div className="space-y-2 text-sm text-white/80">
+                            {(s.facts ?? []).map((f, j) => (
+                              <div key={j} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                                <div>{f.fact}</div>
+                                {f.example ? (
+                                  <div className="mt-2 text-white/65">
+                                    <span className="font-semibold text-white/70">
+                                      Example:
+                                    </span>{" "}
+                                    {f.example}
+                                  </div>
+                                ) : null}
+                                {f.source?.label ? (
+                                  <div className="mt-2 text-white/60">
+                                    <span className="font-semibold text-white/70">
+                                      Source:
+                                    </span>{" "}
+                                    {f.source.label}
+                                  </div>
+                                ) : null}
+                              </div>
+                            ))}
+                          </div>
                         </div>
-                      )}
-
-                      <div className="mt-2">
-                        <SourceLine source={f.source} />
-                      </div>
-                    </li>
-                  ))}
-
-                  {s.facts.length === 0 && (
-                    <li className="text-xs text-slate-400">
-                      No facts returned for this statement.
-                    </li>
-                  )}
-                </ul>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
-            ))}
+            ) : (
+              // Exam Strategy tab
+              <div className="space-y-4">
+                {/* Difficulty + Why */}
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <div className="text-sm font-semibold">EXAM STRATEGY</div>
+                    <Badge tone="blue">
+                      Difficulty:{" "}
+                      {analysis.strategy?.difficulty?.level
+                        ? capitalize(analysis.strategy.difficulty.level)
+                        : "—"}
+                    </Badge>
+                  </div>
 
-            {analysis.statements.length === 0 && (
-              <div className="text-xs text-slate-400">
-                No statement analysis returned.
+                  <div className="text-xs text-white/60">WHY THIS DIFFICULTY?</div>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-white/80">
+                    {(analysis.strategy?.difficulty?.why ?? []).map((x, i) => (
+                      <li key={i}>{x}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* What to do */}
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                  <div className="text-sm font-semibold">WHAT TO DO IN THE EXAM</div>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-white/80">
+                    {(analysis.strategy?.exam_strategy ?? []).map((x, i) => (
+                      <li key={i}>{x}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* Logical deduction */}
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                  <div className="text-sm font-semibold">LOGICAL DEDUCTION & ELIMINATION</div>
+                  <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-white/80">
+                    {(analysis.strategy?.logical_deduction ?? []).map((x, i) => (
+                      <li key={i}>{x}</li>
+                    ))}
+                  </ul>
+                </div>
+
+                {/* AI Verdict LAST (as per your requirement) */}
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                  <div className="mb-2 text-sm font-semibold">AI VERDICT</div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge tone="gray">
+                      Recommendation:{" "}
+                      {analysis.strategy?.ai_verdict?.recommendation
+                        ? analysis.strategy.ai_verdict.recommendation.toUpperCase()
+                        : "—"}
+                    </Badge>
+
+                    {/* Confidence intentionally hidden (per your ask) */}
+                    {/* <Badge tone="gray">
+                      Confidence: {analysis.strategy?.ai_verdict?.confidence ?? "—"}%
+                    </Badge> */}
+                  </div>
+
+                  <div className="mt-3 text-sm text-white/80">
+                    {analysis.strategy?.ai_verdict?.rationale ?? "—"}
+                  </div>
+                </div>
               </div>
             )}
           </div>
-        </div>
-      ) : (
-        <StrategyTabV1 analysis={analysis} />
-      )}
-    </section>
-  );
-}
-
-function SourceLine({ source }: { source: SourceRef }) {
-  const isLinkable =
-    !!source.url &&
-    (source.name === "PIB" ||
-      source.name === "Govt website" ||
-      source.name === "International org" ||
-      source.name === "The Hindu" ||
-      source.name === "Indian Express");
-
-  return (
-    <div className="text-[11px] text-slate-300">
-      <span className="uppercase tracking-wide text-slate-400 font-semibold">Source:</span>{" "}
-      <span className="text-slate-200 font-medium">{source.name}</span>{" "}
-      <span className="text-slate-400">•</span>{" "}
-      <span className="text-slate-300">{source.pointer}</span>
-      {isLinkable && (
-        <>
-          {" "}
-          <span className="text-slate-400">•</span>{" "}
-          <a
-            href={source.url}
-            target="_blank"
-            rel="noreferrer"
-            className="text-emerald-300 hover:text-emerald-200 underline underline-offset-2"
-          >
-            Open
-          </a>
-        </>
-      )}
+        )}
+      </div>
     </div>
   );
 }
 
-function StrategyTabV1({ analysis }: { analysis: QuestionAnalysisV1 }) {
-  const s = analysis.strategy;
-
-  const badge =
-    s.difficulty.level === "easy"
-      ? "border-sky-500 bg-sky-900/40 text-sky-100"
-      : s.difficulty.level === "moderate"
-      ? "border-amber-500 bg-amber-900/30 text-amber-100"
-      : "border-rose-500 bg-rose-900/30 text-rose-100";
-
-  const verdictBadge =
-    s.ai_verdict.recommendation === "attempt"
-      ? "border-emerald-500 bg-emerald-900/40 text-emerald-100"
-      : "border-rose-500 bg-rose-900/40 text-rose-100";
-
-  return (
-    <div className="space-y-4">
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 space-y-2">
-        <div className="flex items-center justify-between">
-          <div className="font-semibold text-slate-200">Difficulty</div>
-          <span
-            className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] uppercase tracking-wide ${badge}`}
-          >
-            {s.difficulty.level}
-          </span>
-        </div>
-        <ul className="mt-2 space-y-1 text-sm text-slate-200 list-disc list-inside">
-          {s.difficulty.why.map((x, i) => (
-            <li key={i}>{x}</li>
-          ))}
-          {s.difficulty.why.length === 0 && (
-            <li className="text-slate-400 list-none">No difficulty rationale returned.</li>
-          )}
-        </ul>
-      </div>
-
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-        <div className="font-semibold text-slate-200">Exam Strategy</div>
-        <ul className="mt-2 space-y-1 text-sm text-slate-200 list-disc list-inside">
-          {s.exam_strategy.map((x, i) => (
-            <li key={i}>{x}</li>
-          ))}
-          {s.exam_strategy.length === 0 && (
-            <li className="text-slate-400 list-none">No strategy points returned.</li>
-          )}
-        </ul>
-      </div>
-
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4">
-        <div className="font-semibold text-slate-200">Logical Deduction</div>
-        <ul className="mt-2 space-y-1 text-sm text-slate-200 list-disc list-inside">
-          {s.logical_deduction.map((x, i) => (
-            <li key={i}>{x}</li>
-          ))}
-          {s.logical_deduction.length === 0 && (
-            <li className="text-slate-400 list-none">No deduction steps returned.</li>
-          )}
-        </ul>
-      </div>
-
-      <div className="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 flex items-start gap-3">
-        <div
-          className={`mt-0.5 inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide ${verdictBadge}`}
-        >
-          AI VERDICT: {s.ai_verdict.recommendation.toUpperCase()}
-        </div>
-        <div className="space-y-1">
-          <div className="text-sm text-slate-200">{s.ai_verdict.rationale}</div>
-          <div className="text-xs text-slate-400">
-            Confidence:{" "}
-            <span className="text-slate-200 font-semibold">{s.ai_verdict.confidence}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
+function capitalize(s: string) {
+  if (!s) return s;
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
