@@ -4,6 +4,10 @@ import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { supabaseClient } from "@/lib/supabaseClient";
 
+/* ----------------------------------------------------- */
+/* UI Helpers */
+/* ----------------------------------------------------- */
+
 function LoadingCard({ text }: { text: string }) {
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 px-6 py-10">
@@ -16,6 +20,12 @@ function LoadingCard({ text }: { text: string }) {
   );
 }
 
+type Mode = "login" | "signup" | "reset";
+
+/* ----------------------------------------------------- */
+/* Client */
+/* ----------------------------------------------------- */
+
 function LoginClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -25,14 +35,19 @@ function LoginClient() {
     return r && r.startsWith("/") ? r : "/practice";
   }, [searchParams]);
 
+  const [mode, setMode] = useState<Mode>("login");
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  // If already logged in, go straight to redirect
+  /* --------------------------------------------------- */
+  /* Boot: redirect if already logged in */
+  /* --------------------------------------------------- */
   useEffect(() => {
     let cancelled = false;
 
@@ -52,30 +67,92 @@ function LoginClient() {
     };
   }, [router, redirectTo]);
 
-  const onLogin = async () => {
-    setErr(null);
+  /* --------------------------------------------------- */
+  /* Actions */
+  /* --------------------------------------------------- */
 
-    const e = email.trim();
-    if (!e) return setErr("Enter your email.");
-    if (!password) return setErr("Enter your password.");
+  async function onLogin() {
+    setError(null);
+    setMessage(null);
+
+    if (!email.trim()) return setError("Enter your email.");
+    if (!password) return setError("Enter your password.");
 
     setSubmitting(true);
     try {
       const { error } = await supabaseClient.auth.signInWithPassword({
-        email: e,
+        email: email.trim(),
         password,
       });
 
       if (error) throw error;
-
-      // After login: if onboarding is incomplete, your middleware should reroute.
       router.replace(redirectTo);
     } catch (e: any) {
-      setErr(e?.message ?? "Login failed.");
+      setError(e?.message ?? "Login failed.");
     } finally {
       setSubmitting(false);
     }
-  };
+  }
+
+  async function onSignup() {
+    setError(null);
+    setMessage(null);
+
+    if (!email.trim()) return setError("Enter your email.");
+    if (!password || password.length < 6)
+      return setError("Password must be at least 6 characters.");
+
+    setSubmitting(true);
+    try {
+      const { error } = await supabaseClient.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          emailRedirectTo: `${location.origin}/login`,
+        },
+      });
+
+      if (error) throw error;
+
+      setMessage(
+        "Account created. Please check your email to verify your account before logging in."
+      );
+      setMode("login");
+      setPassword("");
+    } catch (e: any) {
+      setError(e?.message ?? "Signup failed.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function onResetPassword() {
+    setError(null);
+    setMessage(null);
+
+    if (!email.trim()) return setError("Enter your email.");
+
+    setSubmitting(true);
+    try {
+      const { error } = await supabaseClient.auth.resetPasswordForEmail(
+        email.trim(),
+        {
+          redirectTo: `${location.origin}/login`,
+        }
+      );
+
+      if (error) throw error;
+
+      setMessage("Password reset email sent. Check your inbox.");
+      setMode("login");
+    } catch (e: any) {
+      setError(e?.message ?? "Failed to send reset email.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  /* --------------------------------------------------- */
 
   if (loading) return <LoadingCard text="Checking session…" />;
 
@@ -84,9 +161,13 @@ function LoginClient() {
       <div className="max-w-xl mx-auto space-y-6">
         <header className="space-y-2">
           <div className="text-xs tracking-widest text-slate-400">UPSC AI</div>
-          <h1 className="text-3xl font-semibold">Login</h1>
+          <h1 className="text-3xl font-semibold">
+            {mode === "login" && "Login"}
+            {mode === "signup" && "Create Account"}
+            {mode === "reset" && "Reset Password"}
+          </h1>
           <p className="text-sm text-slate-400">
-            After login you’ll continue to{" "}
+            After authentication you’ll continue to{" "}
             <span className="text-slate-200">{redirectTo}</span>
           </p>
         </header>
@@ -105,42 +186,104 @@ function LoginClient() {
             />
           </label>
 
-          <label className="block">
-            <span className="text-xs uppercase tracking-wide text-slate-400">
-              Password
-            </span>
-            <input
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              type="password"
-              className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm"
-              placeholder="••••••••"
-              autoComplete="current-password"
-            />
-          </label>
+          {mode !== "reset" && (
+            <label className="block">
+              <span className="text-xs uppercase tracking-wide text-slate-400">
+                Password
+              </span>
+              <input
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                type="password"
+                className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm"
+                placeholder="••••••••"
+                autoComplete={
+                  mode === "signup" ? "new-password" : "current-password"
+                }
+              />
+            </label>
+          )}
 
-          {err && (
+          {error && (
             <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
-              {err}
+              {error}
             </div>
           )}
 
-          <button
-            type="button"
-            disabled={submitting}
-            onClick={onLogin}
-            className="w-full rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
-          >
-            {submitting ? "Signing in…" : "Sign in"}
-          </button>
+          {message && (
+            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
+              {message}
+            </div>
+          )}
+
+          {mode === "login" && (
+            <button
+              disabled={submitting}
+              onClick={onLogin}
+              className="w-full rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
+            >
+              {submitting ? "Signing in…" : "Sign in"}
+            </button>
+          )}
+
+          {mode === "signup" && (
+            <button
+              disabled={submitting}
+              onClick={onSignup}
+              className="w-full rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
+            >
+              {submitting ? "Creating account…" : "Create account"}
+            </button>
+          )}
+
+          {mode === "reset" && (
+            <button
+              disabled={submitting}
+              onClick={onResetPassword}
+              className="w-full rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
+            >
+              {submitting ? "Sending email…" : "Send reset email"}
+            </button>
+          )}
+
+          <div className="flex justify-between text-sm text-slate-400 pt-2">
+            {mode !== "login" && (
+              <button
+                className="hover:text-slate-200"
+                onClick={() => setMode("login")}
+              >
+                Back to login
+              </button>
+            )}
+
+            {mode === "login" && (
+              <>
+                <button
+                  className="hover:text-slate-200"
+                  onClick={() => setMode("signup")}
+                >
+                  Create account
+                </button>
+                <button
+                  className="hover:text-slate-200"
+                  onClick={() => setMode("reset")}
+                >
+                  Forgot password?
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </div>
     </main>
   );
 }
 
+/* ----------------------------------------------------- */
+/* Page */
+/* ----------------------------------------------------- */
+
 export default function LoginPage() {
-  // ✅ Fix for Vercel build: wrap anything using useSearchParams() in Suspense
   return (
     <Suspense fallback={<LoadingCard text="Loading login…" />}>
       <LoginClient />
