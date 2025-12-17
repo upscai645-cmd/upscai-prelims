@@ -1,8 +1,11 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabaseClient } from "@/lib/supabaseClient";
+
+type Tab = "general" | "performance";
 
 type ProfileRow = {
   id: string;
@@ -11,97 +14,211 @@ type ProfileRow = {
   phone: string | null;
   state_of_preparation: string | null;
   upsc_attempts: number | null;
-  created_at: string | null;
-  updated_at: string | null;
 };
+
+function Pill({
+  active,
+  children,
+  onClick,
+}: {
+  active: boolean;
+  children: React.ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={[
+        "rounded-md border px-4 py-2 text-sm",
+        active
+          ? "bg-emerald-500 text-slate-950 border-emerald-400"
+          : "bg-slate-900/40 text-slate-200 border-slate-700 hover:bg-slate-800/60",
+      ].join(" ")}
+    >
+      {children}
+    </button>
+  );
+}
+
+function FieldRow({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <div className="flex items-center justify-between gap-6 border-b border-slate-800/70 py-3 last:border-b-0">
+      <div className="text-xs uppercase tracking-wide text-slate-400">
+        {label}
+      </div>
+      <div className="text-sm text-slate-100">{value || "—"}</div>
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  sub,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+      <div className="text-xs uppercase tracking-wide text-slate-400">
+        {label}
+      </div>
+      <div className="mt-2 text-2xl font-semibold text-slate-50">{value}</div>
+      {sub ? <div className="mt-1 text-xs text-slate-400">{sub}</div> : null}
+    </div>
+  );
+}
+
+function formatDateTime(iso: string) {
+  const d = new Date(iso);
+  // simple + readable (local time)
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 export default function ProfilePage() {
   const router = useRouter();
 
-  const [authChecked, setAuthChecked] = useState(false);
+  const [tab, setTab] = useState<Tab>("general");
   const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState<"general" | "analytics">("general");
-
-  const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
+
+  // Perf stats (Step 3.1)
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [totalAttempts, setTotalAttempts] = useState<number>(0);
+  const [correctAttempts, setCorrectAttempts] = useState<number>(0);
+  const [lastAttemptAt, setLastAttemptAt] = useState<string | null>(null);
+
+  const accuracyPct = useMemo(() => {
+    if (!totalAttempts) return 0;
+    return Math.round((correctAttempts / totalAttempts) * 100);
+  }, [totalAttempts, correctAttempts]);
+
+  // Boot: ensure session + load profile
   useEffect(() => {
-    let alive = true;
+    let cancelled = false;
 
-    const boot = async () => {
-      setErr(null);
+    async function boot() {
       setLoading(true);
+      setErr(null);
 
-      try {
-        const { data } = await supabaseClient.auth.getSession();
-        const session = data.session;
-
-        if (!session) {
-          router.replace("/login?redirect=/profile");
-          return;
-        }
-
-        if (alive) setAuthChecked(true);
-
-        // Fetch profile
-        const { data: p, error } = await supabaseClient
-          .from("profiles")
-          .select(
-            "id,email,full_name,phone,state_of_preparation,upsc_attempts,created_at,updated_at"
-          )
-          .eq("id", session.user.id)
-          .single();
-
-        if (error) {
-          // If row missing, show a helpful message (onboarding should create it, but just in case)
-          setProfile(null);
-          setErr(
-            "Profile not found. Please complete onboarding first (or try logging out/in once)."
-          );
-        } else {
-          setProfile(p as ProfileRow);
-        }
-      } catch (e: any) {
-        setErr(e?.message ?? "Failed to load profile.");
-      } finally {
-        if (alive) setLoading(false);
+      const { data, error } = await supabaseClient.auth.getUser();
+      if (error) {
+        if (!cancelled) setErr(error.message);
+        if (!cancelled) setLoading(false);
+        return;
       }
-    };
+
+      const user = data.user;
+      if (!user) {
+        router.replace("/login?redirect=/profile");
+        return;
+      }
+
+      // Load onboarding profile row
+      const { data: prof, error: profErr } = await supabaseClient
+        .from("profiles")
+        .select("id,email,full_name,phone,state_of_preparation,upsc_attempts")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (profErr) {
+        if (!cancelled) setErr(profErr.message);
+      } else {
+        if (!cancelled) setProfile((prof as ProfileRow) || null);
+      }
+
+      if (!cancelled) setLoading(false);
+    }
 
     boot();
-
-    const { data: sub } = supabaseClient.auth.onAuthStateChange((_event, session) => {
-      if (!session) router.replace("/login?redirect=/profile");
-    });
-
     return () => {
-      alive = false;
-      sub?.subscription?.unsubscribe();
+      cancelled = true;
     };
   }, [router]);
 
-  const display = useMemo(() => {
-    const p = profile;
-    return {
-      email: p?.email ?? "—",
-      name: p?.full_name ?? "—",
-      phone: p?.phone ?? "—",
-      state: p?.state_of_preparation ?? "—",
-      attempts:
-        typeof p?.upsc_attempts === "number" ? String(p.upsc_attempts) : "—",
+  // Load performance stats only when performance tab is opened (efficient)
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadStats() {
+      if (tab !== "performance") return;
+      setStatsLoading(true);
+      setErr(null);
+
+      const { data: u } = await supabaseClient.auth.getUser();
+      const userId = u.user?.id;
+      if (!userId) {
+        router.replace("/login?redirect=/profile");
+        return;
+      }
+
+      try {
+        // 1) Total attempts (COUNT only)
+        const totalRes = await supabaseClient
+          .from("question_attempts")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", userId);
+
+        if (totalRes.error) throw totalRes.error;
+        const total = totalRes.count ?? 0;
+
+        // 2) Correct attempts (COUNT only)
+        const correctRes = await supabaseClient
+          .from("question_attempts")
+          .select("id", { count: "exact", head: true })
+          .eq("user_id", userId)
+          .eq("is_correct", true);
+
+        if (correctRes.error) throw correctRes.error;
+        const correct = correctRes.count ?? 0;
+
+        // 3) Last attempted
+        const lastRes = await supabaseClient
+          .from("question_attempts")
+          .select("created_at")
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false })
+          .limit(1);
+
+        if (lastRes.error) throw lastRes.error;
+        const last = lastRes.data?.[0]?.created_at ?? null;
+
+        if (!cancelled) {
+          setTotalAttempts(total);
+          setCorrectAttempts(correct);
+          setLastAttemptAt(last);
+        }
+      } catch (e: any) {
+        if (!cancelled) setErr(e?.message ?? "Failed to load performance.");
+      } finally {
+        if (!cancelled) setStatsLoading(false);
+      }
+    }
+
+    loadStats();
+    return () => {
+      cancelled = true;
     };
-  }, [profile]);
+  }, [tab, router]);
 
-  const onLogout = async () => {
-    await supabaseClient.auth.signOut();
-    router.replace("/login");
-  };
-
-  if (!authChecked) {
+  if (loading) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 px-6 py-10">
-        <div className="max-w-3xl mx-auto text-sm text-slate-400">
-          Checking session…
+        <div className="max-w-4xl mx-auto">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
+            Loading profile…
+          </div>
         </div>
       </main>
     );
@@ -109,115 +226,139 @@ export default function ProfilePage() {
 
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 px-6 py-10">
-      <div className="max-w-3xl mx-auto space-y-6">
-        <header className="flex items-start justify-between gap-4">
-          <div className="space-y-1">
+      <div className="max-w-4xl mx-auto space-y-6">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-2">
             <div className="text-xs tracking-widest text-slate-400">UPSC AI</div>
-            <h1 className="text-2xl md:text-3xl font-semibold">My Profile</h1>
+            <h1 className="text-4xl font-semibold">My Profile</h1>
             <p className="text-sm text-slate-400">
               General info now. Performance tab will be added next.
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => router.push("/practice")}
-              className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
+          <div className="flex gap-2">
+            <Link
+              href="/practice"
+              className="rounded-md bg-slate-900 border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
             >
               Back to Practice
-            </button>
-            <button
-              type="button"
-              onClick={onLogout}
-              className="rounded-md bg-slate-900 border border-slate-700 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
+            </Link>
+            <Link
+              href="/logout"
+              className="rounded-md bg-slate-900 border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
             >
               Logout
-            </button>
+            </Link>
           </div>
         </header>
 
-        {/* Tabs */}
-        <div className="flex gap-2 border-b border-slate-800 pb-2">
-          <button
-            type="button"
-            onClick={() => setTab("general")}
-            className={`px-4 py-2 text-sm rounded-md border transition-colors ${
-              tab === "general"
-                ? "bg-emerald-500 text-slate-950 border-emerald-500"
-                : "bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800"
-            }`}
-          >
+        <div className="flex gap-2">
+          <Pill active={tab === "general"} onClick={() => setTab("general")}>
             General Info
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setTab("analytics")}
-            className={`px-4 py-2 text-sm rounded-md border transition-colors ${
-              tab === "analytics"
-                ? "bg-emerald-500 text-slate-950 border-emerald-500"
-                : "bg-slate-900 text-slate-300 border-slate-700 hover:bg-slate-800"
-            }`}
+          </Pill>
+          <Pill
+            active={tab === "performance"}
+            onClick={() => setTab("performance")}
           >
-            Performance & Analytics
-          </button>
+            Performance &amp; Analytics
+          </Pill>
         </div>
 
-        {/* Content */}
-        <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-5">
-          {loading && <div className="text-sm text-slate-400">Loading…</div>}
+        {err && (
+          <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+            {err}
+          </div>
+        )}
 
-          {!loading && err && (
-            <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
-              {err}
+        <div className="h-px bg-slate-800/70" />
+
+        {tab === "general" ? (
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+            <h2 className="text-base font-semibold">Onboarding details (read-only)</h2>
+
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+                <FieldRow label="Email" value={profile?.email} />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+                <FieldRow label="Full Name" value={profile?.full_name} />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+                <FieldRow label="Phone" value={profile?.phone} />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+                <FieldRow
+                  label="State of Preparation"
+                  value={profile?.state_of_preparation}
+                />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4 md:col-span-2">
+                <FieldRow
+                  label="UPSC Attempts"
+                  value={
+                    typeof profile?.upsc_attempts === "number"
+                      ? String(profile.upsc_attempts)
+                      : null
+                  }
+                />
+              </div>
             </div>
-          )}
 
-          {!loading && !err && tab === "general" && (
-            <div className="space-y-4">
-              <div className="text-sm font-semibold text-slate-200">
-                Onboarding details (read-only)
-              </div>
+            <p className="mt-4 text-xs text-slate-500">
+              Edit flow will be added later.
+            </p>
+          </section>
+        ) : (
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+            <h2 className="text-base font-semibold">Performance (v1)</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              High-signal summary of your attempts. Subject-wise and charts coming next.
+            </p>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                <InfoCard label="Email" value={display.email} />
-                <InfoCard label="Full name" value={display.name} />
-                <InfoCard label="Phone" value={display.phone} />
-                <InfoCard label="State of preparation" value={display.state} />
-                <InfoCard label="UPSC attempts" value={display.attempts} />
+            {statsLoading ? (
+              <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/30 p-4 text-sm text-slate-300">
+                Loading performance…
               </div>
+            ) : totalAttempts === 0 ? (
+              <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/30 p-4 text-sm text-slate-300">
+                No attempts yet. Go to{" "}
+                <Link href="/practice" className="text-emerald-300 hover:underline">
+                  Practice
+                </Link>{" "}
+                and answer a question to see your stats here.
+              </div>
+            ) : (
+              <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <StatCard
+                  label="Total Attempts"
+                  value={String(totalAttempts)}
+                />
+                <StatCard
+                  label="Correct"
+                  value={String(correctAttempts)}
+                />
+                <StatCard
+                  label="Accuracy"
+                  value={`${accuracyPct}%`}
+                  sub="Rounded"
+                />
+                <StatCard
+                  label="Last Attempt"
+                  value={lastAttemptAt ? formatDateTime(lastAttemptAt) : "—"}
+                />
+              </div>
+            )}
 
-              <div className="text-xs text-slate-500">
-                Edit flow will be added later.
-              </div>
+            <div className="mt-4 text-xs text-slate-500">
+              Next: subject-wise attempts + charts.
             </div>
-          )}
-
-          {!loading && !err && tab === "analytics" && (
-            <div className="space-y-2">
-              <div className="text-sm font-semibold text-slate-200">
-                Performance & Analytics
-              </div>
-              <div className="text-sm text-slate-400">
-                Placeholder for now. Next we’ll show attempts, accuracy, subject-wise stats,
-                and “resume last session”.
-              </div>
-            </div>
-          )}
-        </section>
+          </section>
+        )}
       </div>
     </main>
-  );
-}
-
-function InfoCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl border border-slate-800 bg-slate-950/40 p-4">
-      <div className="text-xs uppercase tracking-wide text-slate-400">
-        {label}
-      </div>
-      <div className="mt-1 text-sm text-slate-100">{value}</div>
-    </div>
   );
 }
