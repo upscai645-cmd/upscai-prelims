@@ -94,6 +94,7 @@ export default function ProfilePage() {
   const router = useRouter();
 
   const [tab, setTab] = useState<Tab>("general");
+
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -105,7 +106,7 @@ export default function ProfilePage() {
   const [correctAttempts, setCorrectAttempts] = useState<number>(0);
   const [lastAttemptAt, setLastAttemptAt] = useState<string | null>(null);
 
-  // Subject-wise stats (Step 1)
+  // Subject-wise stats
   const [subjectLoading, setSubjectLoading] = useState(false);
   const [subjectStats, setSubjectStats] = useState<SubjectStat[]>([]);
 
@@ -151,12 +152,13 @@ export default function ProfilePage() {
     }
 
     boot();
+
     return () => {
       cancelled = true;
     };
   }, [router]);
 
-  // Load performance stats ONLY when performance tab is opened
+  // Load performance + subject stats only when tab is opened
   useEffect(() => {
     let cancelled = false;
 
@@ -167,25 +169,33 @@ export default function ProfilePage() {
       setSubjectLoading(true);
       setErr(null);
 
-      const { data: u } = await supabaseClient.auth.getUser();
-      const userId = u.user?.id;
+      const { data: uData, error: uErr } = await supabaseClient.auth.getUser();
+      if (uErr) {
+        if (!cancelled) setErr(uErr.message);
+        if (!cancelled) {
+          setStatsLoading(false);
+          setSubjectLoading(false);
+        }
+        return;
+      }
 
+      const userId = uData.user?.id;
       if (!userId) {
         router.replace("/login?redirect=/profile");
         return;
       }
 
+      // -------------------
+      // 1) Performance cards
+      // -------------------
       try {
-        // 1) Total attempts
         const totalRes = await supabaseClient
           .from("question_attempts")
           .select("id", { count: "exact", head: true })
           .eq("user_id", userId);
 
         if (totalRes.error) throw totalRes.error;
-        const total = totalRes.count ?? 0;
 
-        // 2) Correct attempts
         const correctRes = await supabaseClient
           .from("question_attempts")
           .select("id", { count: "exact", head: true })
@@ -193,9 +203,7 @@ export default function ProfilePage() {
           .eq("is_correct", true);
 
         if (correctRes.error) throw correctRes.error;
-        const correct = correctRes.count ?? 0;
 
-        // 3) Last attempted
         const lastRes = await supabaseClient
           .from("question_attempts")
           .select("created_at")
@@ -204,50 +212,75 @@ export default function ProfilePage() {
           .limit(1);
 
         if (lastRes.error) throw lastRes.error;
-        const last = lastRes.data?.[0]?.created_at ?? null;
 
         if (!cancelled) {
-          setTotalAttempts(total);
-          setCorrectAttempts(correct);
-          setLastAttemptAt(last);
+          setTotalAttempts(totalRes.count ?? 0);
+          setCorrectAttempts(correctRes.count ?? 0);
+          setLastAttemptAt(lastRes.data?.[0]?.created_at ?? null);
         }
       } catch (e: any) {
-        if (!cancelled) setErr(e?.message ?? "Failed to load performance stats.");
+        if (!cancelled)
+          setErr(e?.message ?? "Failed to load performance stats.");
       } finally {
         if (!cancelled) setStatsLoading(false);
       }
 
-      // 4) Subject-wise stats (requires join to questions)
+      // -------------------
+      // 2) Subject-wise stats (NO JOIN)
+      // -------------------
       try {
         const attemptsRes = await supabaseClient
           .from("question_attempts")
-          .select("is_correct, question_id, questions(subject)")
+          .select("question_id,is_correct")
           .eq("user_id", userId)
           .order("created_at", { ascending: false })
-          .limit(5000); // safe cap for v1
+          .limit(5000);
 
         if (attemptsRes.error) throw attemptsRes.error;
 
-        const rows =
+        const attempts =
           (attemptsRes.data as Array<{
-            is_correct: boolean | null;
             question_id: number;
-            questions?: { subject?: string | null } | null;
+            is_correct: boolean | null;
           }>) ?? [];
+
+        const questionIds = Array.from(
+          new Set(attempts.map((a) => a.question_id).filter(Boolean))
+        );
+
+        if (questionIds.length === 0) {
+          if (!cancelled) setSubjectStats([]);
+          return;
+        }
+
+        const questionsRes = await supabaseClient
+          .from("questions")
+          .select("id,subject")
+          .in("id", questionIds);
+
+        if (questionsRes.error) throw questionsRes.error;
+
+        const qRows =
+          (questionsRes.data as Array<{ id: number; subject: string | null }>) ??
+          [];
+
+        const qidToSubject = new Map<number, string>();
+        for (const q of qRows) {
+          const subj = (q.subject ?? "Unknown").trim() || "Unknown";
+          qidToSubject.set(q.id, subj);
+        }
 
         const map = new Map<string, { total: number; correct: number }>();
 
-        for (const r of rows) {
-          const subjRaw = r.questions?.subject ?? "Unknown";
-          const subject = String(subjRaw || "Unknown").trim() || "Unknown";
-
+        for (const a of attempts) {
+          const subject = qidToSubject.get(a.question_id) ?? "Unknown";
           const prev = map.get(subject) ?? { total: 0, correct: 0 };
           prev.total += 1;
-          if (r.is_correct) prev.correct += 1;
+          if (a.is_correct) prev.correct += 1;
           map.set(subject, prev);
         }
 
-        const list: SubjectStat[] = Array.from(map.entries())
+        const list = Array.from(map.entries())
           .map(([subject, v]) => ({
             subject,
             total: v.total,
@@ -258,14 +291,14 @@ export default function ProfilePage() {
 
         if (!cancelled) setSubjectStats(list);
       } catch (e: any) {
-        if (!cancelled)
-          setErr((prev) => prev ?? e?.message ?? "Failed to load subject stats.");
+        if (!cancelled) setErr(e?.message ?? "Failed to load subject stats.");
       } finally {
         if (!cancelled) setSubjectLoading(false);
       }
     }
 
     loadPerformanceAndSubjects();
+
     return () => {
       cancelled = true;
     };
@@ -338,7 +371,9 @@ export default function ProfilePage() {
         {/* Content */}
         {tab === "general" ? (
           <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-            <div className="text-lg font-semibold">Onboarding details (read-only)</div>
+            <div className="text-lg font-semibold">
+              Onboarding details (read-only)
+            </div>
 
             <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/30 p-4">
               <FieldRow label="Email" value={profile?.email} />
@@ -367,7 +402,8 @@ export default function ProfilePage() {
             <div className="space-y-1">
               <div className="text-lg font-semibold">Performance (v1)</div>
               <div className="text-sm text-slate-400">
-                High-signal summary of your attempts. Subject-wise and charts coming next.
+                High-signal summary of your attempts. Subject-wise and charts
+                coming next.
               </div>
             </div>
 
@@ -398,13 +434,13 @@ export default function ProfilePage() {
               />
             </div>
 
-            {/* ✅ STEP 1: Subject-wise Attempts */}
+            {/* Subject-wise Attempts */}
             <div className="mt-6">
               <div className="text-sm font-semibold text-slate-100">
                 Subject-wise Attempts (v1)
               </div>
               <div className="mt-1 text-xs text-slate-400">
-                Total / Correct / Accuracy by subject (based on question_attempts → questions.subject).
+                Total / Correct / Accuracy by subject (question_attempts + questions).
               </div>
 
               <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/30 overflow-hidden">
@@ -451,7 +487,7 @@ export default function ProfilePage() {
               </div>
 
               <div className="mt-3 text-xs text-slate-400">
-                Next: we can add charts + trendline + weak-subject suggestions.
+                Next: charts + trendline + weak-subject suggestions.
               </div>
             </div>
           </section>
