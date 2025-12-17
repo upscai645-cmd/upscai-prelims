@@ -6,6 +6,8 @@ import { useRouter } from "next/navigation";
 import { supabaseClient } from "@/lib/supabaseClient";
 import type { QuestionAnalysisV1, StatementVerdict, SourceRef } from "@/lib/aiAnalysis";
 import { normalizeQuestionAnalysisV1 } from "@/lib/aiAnalysis";
+import Link from "next/link";
+
 
 /* ---------- Question row from Supabase ---------- */
 type QuestionRow = {
@@ -369,6 +371,13 @@ export default function PracticePage() {
             >
               {loadingAnalysis ? "Generating..." : "Check & Generate Analysis"}
             </button>
+
+            <Link
+              href="/profile"
+              className="rounded-md bg-slate-900 border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
+            >
+              My Profile
+            </Link>
 
             <button
               onClick={handleLogout}
