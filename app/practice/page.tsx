@@ -56,6 +56,7 @@ export default function PracticePage() {
   const [selected, setSelected] = useState<string | null>(null);
   const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
   const [analysis, setAnalysis] = useState<QuestionAnalysisV1 | null>(null);
+  const [analysisUpdatedAt, setAnalysisUpdatedAt] = useState<string | null>(null);
   const [loadingAnalysis, setLoadingAnalysis] = useState(false);
 
   // feedback
@@ -88,7 +89,7 @@ const recordAttempt = async (params: {
         question_id: params.questionId,
         selected_option: params.selectedOption,
         is_correct: params.isCorrect,
-        updated_at: new Date().toISOString()
+              
         // created_at should be DEFAULT now() in DB; no need to send it
       },
       { onConflict: "user_id,question_id"
@@ -100,7 +101,7 @@ const recordAttempt = async (params: {
       console.error("Failed to record attempt:", e);
     }
   };
-
+  
 
   /* ======================================================
      AUTH GUARD (MUST RUN FIRST)
@@ -209,6 +210,43 @@ const recordAttempt = async (params: {
 
   const question = filteredQuestions[questionIndex] ?? null;
 
+  useEffect(() => {
+  if (!authChecked || !question) return;
+
+  const loadLast = async () => {
+    try {
+      const { data: u } = await supabaseClient.auth.getUser();
+      const user = u.user;
+      if (!user) return;
+
+      const [{ data: a }, { data: qa }] = await Promise.all([
+        supabaseClient
+          .from("question_attempts")
+          .select("selected_option,is_correct")
+          .eq("user_id", user.id)
+          .eq("question_id", question.id)
+          .maybeSingle(),
+
+        supabaseClient
+          .from("question_analysis")
+          .select("analysis")
+          .eq("user_id", user.id)
+          .eq("question_id", question.id)
+          .maybeSingle(),
+      ]);
+
+      setSelected(a?.selected_option ?? null);
+      setIsCorrect(a?.is_correct ?? null);
+      setAnalysis(qa?.analysis ? normalizeQuestionAnalysisV1(qa.analysis) : null);
+      setAnalysisUpdatedAt(qa?.updated_at ?? null);
+    } catch (e) {
+      console.error("Failed to load last attempt/analysis:", e);
+    }
+  };
+
+  loadLast();
+}, [authChecked, question?.id]);
+
   const currentOptions =
     question != null
       ? [
@@ -237,6 +275,35 @@ const recordAttempt = async (params: {
       context: "analysis",
     });
   };
+
+      
+    // Record Analysis
+    
+  const recordAnalysis = async (params: {
+  questionId: number;
+  analysis: any; // jsonb
+}) => {
+  try {
+    const { data: u, error: userErr } = await supabaseClient.auth.getUser();
+    if (userErr) throw userErr;
+    const user = u.user;
+    if (!user) throw new Error("Not logged in.");
+
+    const { error: upsertErr } = await supabaseClient.from("question_analysis").upsert(
+      {
+        user_id: user.id,
+        question_id: params.questionId,
+        analysis: params.analysis,
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id,question_id" }
+    );
+
+    if (upsertErr) throw upsertErr;
+  } catch (e) {
+    console.error("Failed to record analysis:", e);
+  }
+};
 
   const handlePrev = () => {
     if (questionIndex <= 0) return;
@@ -325,14 +392,26 @@ const recordAttempt = async (params: {
     setError(null);
     setAnalysis(null);
     setIsCorrect(null);
-    const correct = selected === question.correct_option;
-    if (!selected) return; // or throw/show toast
-await recordAttempt({
-  questionId: question.id,
-  selectedOption: selected,
-  isCorrect: !!correct,
-});
 
+    if (!question) return;
+    if (!selected) {
+      setError("Please choose an option first.");
+      return;
+    }
+    if (!correctKey) {
+      setError("Correct option is not set for this question.");
+      return;
+    }
+
+    const correct = selected === correctKey;
+
+    await recordAttempt({
+      questionId: question.id,
+      selectedOption: selected,
+      isCorrect: correct,
+    });
+
+    setIsCorrect(correct);
 
     // reset feedback for this run
     setFeedback((f) => ({
@@ -369,6 +448,11 @@ await recordAttempt({
       const raw = await res.json();
       const normalized = normalizeQuestionAnalysisV1(raw);
       setAnalysis(normalized);
+      setAnalysisUpdatedAt(new Date().toISOString());
+      await recordAnalysis({
+      questionId: question.id,
+      analysis: normalized,
+    });
 
       // ✅ After successful analysis, auto-open feedback lightly? (NO)
       // Keep it optional; user can click button.
@@ -407,7 +491,7 @@ await recordAttempt({
           <div className="flex items-center gap-2">
             <button
               onClick={handleCheckAndAnalyse}
-              disabled={loadingAnalysis || loadingQuestion || !question}
+              disabled={loadingAnalysis || loadingQuestion || !question || !selected}
               className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
             >
               {loadingAnalysis ? "Generating..." : "Check & Generate Analysis"}
@@ -579,7 +663,10 @@ await recordAttempt({
         {/* AI analysis */}
         {analysis && (
           <section className="space-y-3">
-            <AnalysisTabs analysis={analysis} />
+            <AnalysisTabs
+              analysis={analysis}
+              analysisUpdatedAt={analysisUpdatedAt}
+            />
 
             {/* ✅ Feedback CTA after analysis */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 flex items-center justify-between gap-3">
@@ -712,9 +799,16 @@ await recordAttempt({
 
 type AnalysisTabsProps = {
   analysis: QuestionAnalysisV1;
+  analysisUpdatedAt?: string | null;
 };
 
-function AnalysisTabs({ analysis }: AnalysisTabsProps) {
+function AnalysisTabs({
+  analysis,
+  analysisUpdatedAt,
+}: {
+  analysis: QuestionAnalysisV1;
+  analysisUpdatedAt: string | null;
+}) {
   const [activeTab, setActiveTab] = useState<"solution" | "strategy">("solution");
 
   const tabBase = "px-4 py-2 text-sm rounded-md border transition-colors";
@@ -733,6 +827,11 @@ function AnalysisTabs({ analysis }: AnalysisTabsProps) {
 
   return (
     <section className="space-y-4">
+      {analysisUpdatedAt && (
+      <div className="text-xs text-slate-400">
+    Last generated: {new Date(analysisUpdatedAt).toLocaleString()}
+  </div>
+)}
       <div className="flex gap-2 border-b border-slate-700 pb-2">
         <button
           type="button"
