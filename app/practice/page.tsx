@@ -83,12 +83,15 @@ const recordAttempt = async (params: {
       const user = u.user;
       if (!user) throw new Error("Not logged in.");
 
-      const { error: insertErr } = await supabaseClient.from("question_attempts").insert({
+      const { error: insertErr } = await supabaseClient.from("question_attempts").upsert({
         user_id: user.id,
         question_id: params.questionId,
         selected_option: params.selectedOption,
         is_correct: params.isCorrect,
+        updated_at: new Date().toISOString()
         // created_at should be DEFAULT now() in DB; no need to send it
+      },
+      { onConflict: "user_id,question_id"
       });
 
       if (insertErr) throw insertErr;
