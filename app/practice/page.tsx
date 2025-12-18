@@ -323,11 +323,12 @@ const recordAttempt = async (params: {
     setAnalysis(null);
     setIsCorrect(null);
     const correct = selected === question.correct_option;
-    await recordAttempt({
-     questionId: question.id,
-     selectedOption: selected,
-  isCorrect: correct,
-  });
+    if (!selected) return; // or throw/show toast
+await recordAttempt({
+  questionId: question.id,
+  selectedOption: selected,
+  isCorrect: !!correct,
+});
 
 
     // reset feedback for this run
