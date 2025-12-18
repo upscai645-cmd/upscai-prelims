@@ -69,6 +69,36 @@ export default function PracticePage() {
     context: "analysis",
   });
 
+  // 
+
+  /* 👇 INSERT recordAttempt HERE */
+const recordAttempt = async (params: {
+    questionId: number;
+    selectedOption: string;
+    isCorrect: boolean;
+  }) => {
+    try {
+      const { data: u, error: userErr } = await supabaseClient.auth.getUser();
+      if (userErr) throw userErr;
+      const user = u.user;
+      if (!user) throw new Error("Not logged in.");
+
+      const { error: insertErr } = await supabaseClient.from("question_attempts").insert({
+        user_id: user.id,
+        question_id: params.questionId,
+        selected_option: params.selectedOption,
+        is_correct: params.isCorrect,
+        // created_at should be DEFAULT now() in DB; no need to send it
+      });
+
+      if (insertErr) throw insertErr;
+    } catch (e) {
+      // Don’t block analysis if logging fails; but do log for debugging
+      console.error("Failed to record attempt:", e);
+    }
+  };
+
+
   /* ======================================================
      AUTH GUARD (MUST RUN FIRST)
      ====================================================== */
@@ -292,6 +322,13 @@ export default function PracticePage() {
     setError(null);
     setAnalysis(null);
     setIsCorrect(null);
+    const correct = selected === question.correct_option;
+    await recordAttempt({
+     questionId: question.id,
+     selectedOption: selected,
+  isCorrect: correct,
+  });
+
 
     // reset feedback for this run
     setFeedback((f) => ({
