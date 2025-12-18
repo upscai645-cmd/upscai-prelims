@@ -229,7 +229,7 @@ const recordAttempt = async (params: {
 
         supabaseClient
           .from("question_analysis")
-          .select("analysis")
+          .select("analysis,updated_at")
           .eq("user_id", user.id)
           .eq("question_id", question.id)
           .maybeSingle(),
@@ -662,11 +662,11 @@ const recordAttempt = async (params: {
 
         {/* AI analysis */}
         {analysis && (
-          <section className="space-y-3">
-            <AnalysisTabs
-              analysis={analysis}
-              analysisUpdatedAt={analysisUpdatedAt}
-            />
+  <section className="space-y-3">
+    <AnalysisTabs
+      analysis={analysis}
+      analysisUpdatedAt={analysisUpdatedAt}
+    />
 
             {/* ✅ Feedback CTA after analysis */}
             <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 flex items-center justify-between gap-3">
@@ -802,13 +802,7 @@ type AnalysisTabsProps = {
   analysisUpdatedAt?: string | null;
 };
 
-function AnalysisTabs({
-  analysis,
-  analysisUpdatedAt,
-}: {
-  analysis: QuestionAnalysisV1;
-  analysisUpdatedAt: string | null;
-}) {
+function AnalysisTabs({ analysis, analysisUpdatedAt }: AnalysisTabsProps) {
   const [activeTab, setActiveTab] = useState<"solution" | "strategy">("solution");
 
   const tabBase = "px-4 py-2 text-sm rounded-md border transition-colors";
