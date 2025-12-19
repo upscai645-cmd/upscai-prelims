@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { supabaseClient } from "@/lib/supabaseClient";
@@ -18,9 +18,9 @@ type ProfileRow = {
 
 type SubjectStat = {
   subject: string;
-  total: number;
+  attempts: number;
   correct: number;
-  accuracy: number; // 0..100 (rounded)
+  accuracyPct: number; // 0..100
 };
 
 function Pill({
@@ -90,11 +90,62 @@ function formatDateTime(iso: string) {
   });
 }
 
+const SUBJECT_PLAYBOOK: Record<string, string[]> = {
+  "ECONOMICS": [
+    "Revise NCERT XI–XII basics + 1-page notes for key terms (inflation, GDP, BoP, fiscal deficit).",
+    "Make a “committees + indices + schemes” cheat sheet (FRBM, MPC, CPI/WPI, GDP deflator).",
+    "Solve 20 PYQs + reattempt wrong ones after 48 hours (error-log).",
+  ],
+  "CURRENT EVENTS": [
+    "Maintain monthly CA sheets: Polity/Gov, Economy, S&T, Env, IR (1 page each).",
+    "For every wrong Q: write the static anchor (Act/Article, index, place, institution).",
+    "Re-solve last 2 years PYQs of this subject weekly.",
+  ],
+  "POLITY": [
+    "Articles + schedules + bodies: flashcards + weekly revision.",
+    "SC doctrines/landmark cases: 1-liner each.",
+    "PYQ drill: statement-based elimination practice.",
+  ],
+  "ENVIRONMENT": [
+    "Maps + protected areas + species lists (IUCN/CITES) quick revision.",
+    "Conventions/protocols: 1 page (COPs, UNFCCC, CBD, Ramsar).",
+    "20 PYQs + focus on tricky statements.",
+  ],
+  "SCIENCE & TECH": [
+    "Make 1-pagers for biotech/space/IT/defence terms.",
+    "Maintain error-log: why your option was wrong (UPSC traps).",
+    "Reattempt wrong PYQs after 48 hours.",
+  ],
+  "ANCIENT & MEDIEVAL": [
+    "Timeline + themes (art/culture, admin, economy) 1-pagers.",
+    "Source-based facts (inscriptions/texts) flashcards.",
+    "PYQ set + reattempt wrong ones.",
+  ],
+  "MODERN HISTORY": [
+    "Timeline (1857→1947) + personalities/acts 1-pagers.",
+    "Movements: causes-methods-outcomes (3-liner each).",
+    "PYQ drill + reattempt wrong ones.",
+  ],
+  "GEOGRAPHY": [
+    "Maps practice + physical processes basics.",
+    "Climatic phenomena + Indian regions revision.",
+    "PYQ statement elimination + diagram memory.",
+  ],
+  "__default": [
+    "30-min concept revision + 20 PYQs.",
+    "Note missed anchor facts (definitions/lists/committees/dates).",
+    "Reattempt wrong PYQs after 48 hours.",
+  ],
+};
+
 export default function ProfilePage() {
   const router = useRouter();
 
-  const [tab, setTab] = useState<Tab>("general");
+  // --- knobs (as you set) ---
+  const N = 5;
+  const T = 60;
 
+  const [tab, setTab] = useState<Tab>("general");
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
@@ -114,6 +165,16 @@ export default function ProfilePage() {
     if (!totalAttempts) return 0;
     return Math.round((correctAttempts / totalAttempts) * 100);
   }, [totalAttempts, correctAttempts]);
+
+  // ✅ Weak-subject suggestions (Step 1–7 rolled in)
+  const weakSubjects = useMemo(() => {
+    const weak = subjectStats
+      .filter((s) => s.attempts > 0 && s.accuracyPct < T)
+      .sort((a, b) => a.accuracyPct - b.accuracyPct)
+      .slice(0, N);
+
+    return weak;
+  }, [subjectStats, N, T]);
 
   // Boot: ensure session + load profile
   useEffect(() => {
@@ -152,13 +213,12 @@ export default function ProfilePage() {
     }
 
     boot();
-
     return () => {
       cancelled = true;
     };
   }, [router]);
 
-  // Load performance + subject stats only when tab is opened
+  // Load performance + subjects ONLY when performance tab is opened
   useEffect(() => {
     let cancelled = false;
 
@@ -169,136 +229,76 @@ export default function ProfilePage() {
       setSubjectLoading(true);
       setErr(null);
 
-      const { data: uData, error: uErr } = await supabaseClient.auth.getUser();
-      if (uErr) {
-        if (!cancelled) setErr(uErr.message);
-        if (!cancelled) {
-          setStatsLoading(false);
-          setSubjectLoading(false);
-        }
-        return;
-      }
+      const { data: u } = await supabaseClient.auth.getUser();
+      const userId = u.user?.id;
 
-      const userId = uData.user?.id;
       if (!userId) {
         router.replace("/login?redirect=/profile");
         return;
       }
 
-      // -------------------
-      // 1) Performance cards
-      // -------------------
       try {
-        const totalRes = await supabaseClient
+        // Pull attempts with joined question subject
+        const { data: attempts, error: aErr } = await supabaseClient
           .from("question_attempts")
-          .select("id", { count: "exact", head: true })
+          .select("is_correct, created_at, questions(subject)")
           .eq("user_id", userId);
 
-        if (totalRes.error) throw totalRes.error;
+        if (aErr) throw aErr;
 
-        const correctRes = await supabaseClient
-          .from("question_attempts")
-          .select("id", { count: "exact", head: true })
-          .eq("user_id", userId)
-          .eq("is_correct", true);
-
-        if (correctRes.error) throw correctRes.error;
-
-        const lastRes = await supabaseClient
-          .from("question_attempts")
-          .select("created_at")
-          .eq("user_id", userId)
-          .order("created_at", { ascending: false })
-          .limit(1);
-
-        if (lastRes.error) throw lastRes.error;
-
-        if (!cancelled) {
-          setTotalAttempts(totalRes.count ?? 0);
-          setCorrectAttempts(correctRes.count ?? 0);
-          setLastAttemptAt(lastRes.data?.[0]?.created_at ?? null);
-        }
-      } catch (e: any) {
-        if (!cancelled)
-          setErr(e?.message ?? "Failed to load performance stats.");
-      } finally {
-        if (!cancelled) setStatsLoading(false);
-      }
-
-      // -------------------
-      // 2) Subject-wise stats (NO JOIN)
-      // -------------------
-      try {
-        const attemptsRes = await supabaseClient
-          .from("question_attempts")
-          .select("question_id,is_correct")
-          .eq("user_id", userId)
-          .order("created_at", { ascending: false })
-          .limit(5000);
-
-        if (attemptsRes.error) throw attemptsRes.error;
-
-        const attempts =
-          (attemptsRes.data as Array<{
-            question_id: number;
+        const rows =
+          (attempts as Array<{
             is_correct: boolean | null;
-          }>) ?? [];
+            created_at: string;
+            questions: { subject: string | null } | null;
+          }>) || [];
 
-        const questionIds = Array.from(
-          new Set(attempts.map((a) => a.question_id).filter(Boolean))
-        );
+        const total = rows.length;
+        const correct = rows.filter((r) => r.is_correct === true).length;
 
-        if (questionIds.length === 0) {
-          if (!cancelled) setSubjectStats([]);
-          return;
+        let last: string | null = null;
+        for (const r of rows) {
+          if (!last || new Date(r.created_at).getTime() > new Date(last).getTime()) {
+            last = r.created_at;
+          }
         }
 
-        const questionsRes = await supabaseClient
-          .from("questions")
-          .select("id,subject")
-          .in("id", questionIds);
-
-        if (questionsRes.error) throw questionsRes.error;
-
-        const qRows =
-          (questionsRes.data as Array<{ id: number; subject: string | null }>) ??
-          [];
-
-        const qidToSubject = new Map<number, string>();
-        for (const q of qRows) {
-          const subj = (q.subject ?? "Unknown").trim() || "Unknown";
-          qidToSubject.set(q.id, subj);
+        // Build subject stats
+        const map = new Map<string, { attempts: number; correct: number }>();
+        for (const r of rows) {
+          const subject = (r.questions?.subject || "Unknown").trim();
+          const cur = map.get(subject) || { attempts: 0, correct: 0 };
+          cur.attempts += 1;
+          if (r.is_correct === true) cur.correct += 1;
+          map.set(subject, cur);
         }
 
-        const map = new Map<string, { total: number; correct: number }>();
-
-        for (const a of attempts) {
-          const subject = qidToSubject.get(a.question_id) ?? "Unknown";
-          const prev = map.get(subject) ?? { total: 0, correct: 0 };
-          prev.total += 1;
-          if (a.is_correct) prev.correct += 1;
-          map.set(subject, prev);
-        }
-
-        const list = Array.from(map.entries())
+        const list: SubjectStat[] = Array.from(map.entries())
           .map(([subject, v]) => ({
             subject,
-            total: v.total,
+            attempts: v.attempts,
             correct: v.correct,
-            accuracy: v.total ? Math.round((v.correct / v.total) * 100) : 0,
+            accuracyPct: v.attempts ? Math.round((v.correct / v.attempts) * 100) : 0,
           }))
-          .sort((a, b) => b.total - a.total || b.accuracy - a.accuracy);
+          .sort((a, b) => b.attempts - a.attempts);
 
-        if (!cancelled) setSubjectStats(list);
+        if (!cancelled) {
+          setTotalAttempts(total);
+          setCorrectAttempts(correct);
+          setLastAttemptAt(last);
+          setSubjectStats(list);
+        }
       } catch (e: any) {
-        if (!cancelled) setErr(e?.message ?? "Failed to load subject stats.");
+        if (!cancelled) setErr(e?.message ?? "Failed to load performance.");
       } finally {
-        if (!cancelled) setSubjectLoading(false);
+        if (!cancelled) {
+          setStatsLoading(false);
+          setSubjectLoading(false);
+        }
       }
     }
 
     loadPerformanceAndSubjects();
-
     return () => {
       cancelled = true;
     };
@@ -312,8 +312,10 @@ export default function ProfilePage() {
   if (loading) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 px-6 py-10">
-        <div className="max-w-4xl mx-auto text-sm text-slate-400">
-          Loading profile…
+        <div className="max-w-4xl mx-auto">
+          <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
+            Loading profile…
+          </div>
         </div>
       </main>
     );
@@ -322,17 +324,16 @@ export default function ProfilePage() {
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 px-6 py-10">
       <div className="max-w-4xl mx-auto space-y-6">
-        {/* Header */}
-        <header className="flex items-start justify-between gap-4">
-          <div className="space-y-1">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-2">
             <div className="text-xs tracking-widest text-slate-400">UPSC AI</div>
-            <h1 className="text-3xl font-semibold">My Profile</h1>
+            <h1 className="text-4xl font-semibold">My Profile</h1>
             <p className="text-sm text-slate-400">
-              General info now. Performance tab will be added next.
+              General info + performance snapshot.
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex gap-2">
             <Link
               href="/practice"
               className="rounded-md bg-slate-900 border border-slate-700 px-4 py-2 text-sm text-slate-200 hover:bg-slate-800"
@@ -349,147 +350,193 @@ export default function ProfilePage() {
           </div>
         </header>
 
-        {/* Tabs */}
-        <div className="flex items-center gap-2">
+        <div className="flex gap-2">
           <Pill active={tab === "general"} onClick={() => setTab("general")}>
             General Info
           </Pill>
-          <Pill
-            active={tab === "performance"}
-            onClick={() => setTab("performance")}
-          >
+          <Pill active={tab === "performance"} onClick={() => setTab("performance")}>
             Performance &amp; Analytics
           </Pill>
         </div>
 
-        {err ? (
-          <div className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+        {err && (
+          <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
             {err}
           </div>
-        ) : null}
+        )}
 
-        {/* Content */}
+        <div className="h-px bg-slate-800/70" />
+
         {tab === "general" ? (
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-            <div className="text-lg font-semibold">
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+            <h2 className="text-base font-semibold">
               Onboarding details (read-only)
+            </h2>
+
+            <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+                <FieldRow label="Email" value={profile?.email} />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+                <FieldRow label="Full Name" value={profile?.full_name} />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+                <FieldRow label="Phone" value={profile?.phone} />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4">
+                <FieldRow
+                  label="State of Preparation"
+                  value={profile?.state_of_preparation}
+                />
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-950/30 p-4 md:col-span-2">
+                <FieldRow
+                  label="UPSC Attempts"
+                  value={
+                    typeof profile?.upsc_attempts === "number"
+                      ? String(profile.upsc_attempts)
+                      : null
+                  }
+                />
+              </div>
             </div>
 
-            <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/30 p-4">
-              <FieldRow label="Email" value={profile?.email} />
-              <FieldRow label="Full Name" value={profile?.full_name} />
-              <FieldRow label="Phone" value={profile?.phone} />
-              <FieldRow
-                label="State of Preparation"
-                value={profile?.state_of_preparation}
-              />
-              <FieldRow
-                label="UPSC Attempts"
-                value={
-                  profile?.upsc_attempts != null
-                    ? String(profile.upsc_attempts)
-                    : "—"
-                }
-              />
-            </div>
-
-            <div className="mt-4 text-xs text-slate-400">
-              Edit flow will be added later.
-            </div>
+            <p className="mt-4 text-xs text-slate-500">Edit flow will be added later.</p>
           </section>
         ) : (
-          <section className="rounded-2xl border border-slate-800 bg-slate-900/60 p-6">
-            <div className="space-y-1">
-              <div className="text-lg font-semibold">Performance (v1)</div>
-              <div className="text-sm text-slate-400">
-                High-signal summary of your attempts. Subject-wise and charts
-                coming next.
-              </div>
-            </div>
+          <section className="rounded-2xl border border-slate-800 bg-slate-900/40 p-6">
+            <h2 className="text-base font-semibold">Performance (v1)</h2>
+            <p className="mt-1 text-sm text-slate-400">
+              Overall + subject-wise + weak-subject suggestions (N={N}, T={T}%).
+            </p>
 
-            {/* Top stat cards */}
-            <div className="mt-5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              <StatCard
-                label="Total Attempts"
-                value={statsLoading ? "…" : String(totalAttempts)}
-              />
-              <StatCard
-                label="Correct"
-                value={statsLoading ? "…" : String(correctAttempts)}
-              />
-              <StatCard
-                label="Accuracy"
-                value={statsLoading ? "…" : `${accuracyPct}%`}
-                sub="Rounded"
-              />
-              <StatCard
-                label="Last Attempt"
-                value={
-                  statsLoading
-                    ? "…"
-                    : lastAttemptAt
-                    ? formatDateTime(lastAttemptAt)
-                    : "—"
-                }
-              />
-            </div>
-
-            {/* Subject-wise Attempts */}
-            <div className="mt-6">
-              <div className="text-sm font-semibold text-slate-100">
-                Subject-wise Attempts (v1)
+            {statsLoading ? (
+              <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/30 p-4 text-sm text-slate-300">
+                Loading performance…
               </div>
-              <div className="mt-1 text-xs text-slate-400">
-                Total / Correct / Accuracy by subject (question_attempts + questions).
+            ) : totalAttempts === 0 ? (
+              <div className="mt-5 rounded-xl border border-slate-800 bg-slate-950/30 p-4 text-sm text-slate-300">
+                No attempts yet. Go to{" "}
+                <Link href="/practice" className="text-emerald-300 hover:underline">
+                  Practice
+                </Link>{" "}
+                and answer a question to see your stats here.
               </div>
-
-              <div className="mt-3 rounded-xl border border-slate-800 bg-slate-950/30 overflow-hidden">
-                <div className="grid grid-cols-12 gap-2 px-4 py-3 text-xs uppercase tracking-wide text-slate-400 border-b border-slate-800/70">
-                  <div className="col-span-6">Subject</div>
-                  <div className="col-span-2 text-right">Attempts</div>
-                  <div className="col-span-2 text-right">Correct</div>
-                  <div className="col-span-2 text-right">Accuracy</div>
+            ) : (
+              <>
+                <div className="mt-5 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                  <StatCard label="Total Attempts" value={String(totalAttempts)} />
+                  <StatCard label="Correct" value={String(correctAttempts)} />
+                  <StatCard label="Accuracy" value={`${accuracyPct}%`} sub="Rounded" />
+                  <StatCard
+                    label="Last Attempt"
+                    value={lastAttemptAt ? formatDateTime(lastAttemptAt) : "—"}
+                  />
                 </div>
 
-                {subjectLoading ? (
-                  <div className="px-4 py-4 text-sm text-slate-400">
-                    Loading subject-wise stats…
-                  </div>
-                ) : subjectStats.length === 0 ? (
-                  <div className="px-4 py-4 text-sm text-slate-400">
-                    No attempts yet. Solve a few questions and come back here.
-                  </div>
-                ) : (
-                  <div className="divide-y divide-slate-800/60">
-                    {subjectStats.map((s) => (
-                      <div
-                        key={s.subject}
-                        className="grid grid-cols-12 gap-2 px-4 py-3 text-sm"
-                      >
-                        <div className="col-span-6 text-slate-100">
-                          {s.subject}
-                        </div>
-                        <div className="col-span-2 text-right text-slate-200">
-                          {s.total}
-                        </div>
-                        <div className="col-span-2 text-right text-slate-200">
-                          {s.correct}
-                        </div>
-                        <div className="col-span-2 text-right">
-                          <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-900/40 px-2 py-0.5 text-xs text-slate-200">
-                            {s.accuracy}%
-                          </span>
-                        </div>
+                {/* ✅ Weak-subject suggestions */}
+                <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/30 p-5">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-100">
+                        Weak-subject suggestions
                       </div>
-                    ))}
+                      <div className="mt-1 text-xs text-slate-400">
+                        Picks up to {N} subjects with accuracy below {T}% (sorted worst-first).
+                      </div>
+                    </div>
                   </div>
-                )}
-              </div>
 
-              <div className="mt-3 text-xs text-slate-400">
-                Next: charts + trendline + weak-subject suggestions.
-              </div>
-            </div>
+                    {weakSubjects.map((s) => {
+                      const subjectKey = (s.subject ?? "")
+                        .toUpperCase()
+                        .trim()
+                        .replace(/\s+/g, " ");
+
+                      const tips = SUBJECT_PLAYBOOK[subjectKey] ?? SUBJECT_PLAYBOOK["__default"];
+
+                      return (
+                        <div
+                          key={s.subject}
+                          className="rounded-xl border border-slate-800 bg-slate-900/30 p-4"
+                        >
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="text-sm font-semibold text-slate-100">
+                              {s.subject || "Unknown"}
+                            </div>
+
+                            <div className="text-xs text-slate-400">
+                              Attempts:{" "}
+                              <span className="text-slate-200 font-medium">{s.attempts}</span>
+                              {" · "}Accuracy:{" "}
+                              <span className="text-rose-200 font-semibold">{s.accuracyPct}%</span>
+                            </div>
+                          </div>
+
+                          <ul className="mt-3 list-disc pl-5 space-y-2 text-sm text-slate-200">
+                            {tips.map((t, i) => (
+                              <li key={i}>{t}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      );
+                    })}
+                    </div>
+
+                {/* Subject-wise table */}
+                <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/30 p-5">
+                  <div className="text-sm font-semibold text-slate-100">
+                    Subject-wise attempts
+                  </div>
+                  <div className="mt-1 text-xs text-slate-400">
+                    Sorted by attempts (desc).
+                  </div>
+
+                  {subjectLoading ? (
+                    <div className="mt-4 text-sm text-slate-300">
+                      Loading subject stats…
+                    </div>
+                  ) : subjectStats.length === 0 ? (
+                    <div className="mt-4 text-sm text-slate-300">
+                      No subject stats yet.
+                    </div>
+                  ) : (
+                    <div className="mt-4 overflow-hidden rounded-xl border border-slate-800">
+                      <div className="grid grid-cols-12 bg-slate-900/60 px-4 py-2 text-xs uppercase tracking-wide text-slate-400">
+                        <div className="col-span-6">Subject</div>
+                        <div className="col-span-2 text-right">Attempts</div>
+                        <div className="col-span-2 text-right">Correct</div>
+                        <div className="col-span-2 text-right">Accuracy</div>
+                      </div>
+
+                      {subjectStats.map((s) => (
+                        <div
+                          key={s.subject}
+                          className="grid grid-cols-12 px-4 py-3 text-sm border-t border-slate-800/70"
+                        >
+                          <div className="col-span-6 text-slate-100">
+                            {s.subject}
+                          </div>
+                          <div className="col-span-2 text-right text-slate-200">
+                            {s.attempts}
+                          </div>
+                          <div className="col-span-2 text-right text-slate-200">
+                            {s.correct}
+                          </div>
+                          <div className="col-span-2 text-right text-slate-200">
+                            {s.accuracyPct}%
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
           </section>
         )}
       </div>
