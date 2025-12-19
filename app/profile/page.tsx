@@ -246,12 +246,16 @@ export default function ProfilePage() {
 
         if (aErr) throw aErr;
 
-        const rows =
-          (attempts as Array<{
-            is_correct: boolean | null;
-            created_at: string;
-            questions: { subject: string | null } | null;
-          }>) || [];
+        type AttemptRow = {
+          is_correct: boolean | null;
+          created_at: string;
+          questions:
+            | { subject: string | null }
+            | { subject: string | null }[]
+            | null;
+        };
+
+        const rows = (attempts ?? []) as AttemptRow[];
 
         const total = rows.length;
         const correct = rows.filter((r) => r.is_correct === true).length;
@@ -266,7 +270,12 @@ export default function ProfilePage() {
         // Build subject stats
         const map = new Map<string, { attempts: number; correct: number }>();
         for (const r of rows) {
-          const subject = (r.questions?.subject || "Unknown").trim();
+          const subject = 
+            (
+              (Array.isArray(r.questions)
+                ? (r.questions[0]?.subject ?? null)
+                : r.questions?.subject) ?? "Unknown"
+            ).trim();
           const cur = map.get(subject) || { attempts: 0, correct: 0 };
           cur.attempts += 1;
           if (r.is_correct === true) cur.correct += 1;
