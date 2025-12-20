@@ -59,6 +59,16 @@ export default function PracticePage() {
   const [analysisUpdatedAt, setAnalysisUpdatedAt] = useState<string | null>(null);
   const [loadingAnalysis, setLoadingAnalysis] = useState(false);
 
+  // quota (free plan gating)
+  type QuotaState = {
+    isPro: boolean;
+    remainingToday: number;          // e.g. 2 -> 1 -> 0
+    lifetimeFreeRemaining: number;   // e.g. 25 -> 0
+  };
+
+  const [quota, setQuota] = useState<QuotaState | null>(null);
+  const [quotaLoading, setQuotaLoading] = useState(false);
+
   // feedback
   const [feedback, setFeedback] = useState<FeedbackState>({
     open: false,
@@ -171,6 +181,28 @@ const recordAttempt = async (params: {
 
     loadQuestions();
   }, [authChecked]);
+
+
+ // useEffect(() => {
+  //  if (!authChecked) return;
+
+  //  const loadQuota = async () => {
+  //    try {
+  //      setQuotaLoading(true);
+  //      const res = await fetch("/api/quota", { cache: "no-store" });
+  //      if (!res.ok) return; // don’t block UI
+  //      const q = (await res.json()) as QuotaState;
+  //      setQuota(q);
+  //    } catch (e) {
+  //      console.warn("Failed to load quota:", e);
+  //    } finally {
+  //      setQuotaLoading(false);
+  //    }
+  //  };
+
+  //  loadQuota();
+  // }, [authChecked]);
+  
 
   const years = useMemo(() => {
     const ys = Array.from(
@@ -425,42 +457,62 @@ const recordAttempt = async (params: {
       context: "analysis",
     }));
 
-    if (!question) {
-      setError("Question not loaded yet.");
+    // ✅ Gate analysis by quota (free users)
+    if (quota && !quota.isPro && quota.remainingToday <= 0) {
+      setError("AI analysis limit reached for today. Come back tomorrow or upgrade.");
       return;
     }
-    if (!selected) {
-      setError("Please choose an option first.");
-      return;
-    }
-    if (!correctKey) {
-      setError("Correct option is not set for this question.");
-      return;
-    }
-
-    setIsCorrect(selected === correctKey);
 
     try {
       setLoadingAnalysis(true);
-      const res = await fetch(`/test-ai?questionId=${question.id}`);
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const { data } = await supabaseClient.auth.getSession();
+      const token = data.session?.access_token;
 
-      const raw = await res.json();
-      const normalized = normalizeQuestionAnalysisV1(raw);
+      if (!token) {
+        setError("Session expired. Please login again.");
+        router.replace("/login?redirect=/practice");
+        return;
+      }
+      const res = await fetch(`/api/analysis?questionId=${question.id}&refresh=1`, {
+        method: "GET",
+        cache: "no-store",
+        headers: {
+            Authorization: `Bearer ${token}`,
+          },
+      });
+
+      if (res.status === 402 || res.status === 429) {
+        const msg = (await res.json().catch(() => null))?.error;
+        setError(msg || "AI analysis limit reached. Please try later / upgrade.");
+        return;
+      }
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        const msg =
+          body?.message ||
+          body?.error ||
+          body?.details ||
+          `Server returned ${res.status}`;
+        throw new Error(msg);
+      }
+
+      const payload = await res.json();
+      const normalized = normalizeQuestionAnalysisV1(payload.analysis ?? payload);
       setAnalysis(normalized);
       setAnalysisUpdatedAt(new Date().toISOString());
+
       await recordAnalysis({
-      questionId: question.id,
-      analysis: normalized,
-    });
+        questionId: question.id,
+        analysis: normalized,
+      });
 
       // ✅ After successful analysis, auto-open feedback lightly? (NO)
       // Keep it optional; user can click button.
     } catch (err) {
       console.error("Failed to fetch AI analysis:", err);
-      setError("Failed to fetch AI analysis. Please try again.");
+      setError(err instanceof Error ? err.message : "Failed to fetch AI analysis. Please try again.");
       // ✅ allow user to report issue even if analysis fails
-      openFeedback("error");
     } finally {
       setLoadingAnalysis(false);
     }
