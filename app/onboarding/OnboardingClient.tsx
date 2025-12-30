@@ -1,13 +1,8 @@
-// app/onboarding/OnboardingClient.tsx
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { supabaseClient } from "@/lib/supabaseClient";
-
-type Props = {
-  redirectTo: string;
-};
 
 type ProfileRow = {
   id: string;
@@ -16,86 +11,106 @@ type ProfileRow = {
   phone: string | null;
   state_of_preparation: string | null;
   upsc_attempts: number | null;
+  onboarded: boolean | null;
+  is_pro: boolean | null;
 };
 
-export default function OnboardingClient({ redirectTo }: Props) {
+export default function OnboardingClient() {
   const router = useRouter();
+  const sp = useSearchParams();
+
+  const redirectTo = useMemo(() => sp.get("redirectTo") || "/practice", [sp]);
 
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [email, setEmail] = useState("");
 
-  const [email, setEmail] = useState<string>("");
+  const [profile, setProfile] = useState<ProfileRow | null>(null);
+
+  // form state
   const [fullName, setFullName] = useState("");
   const [phone, setPhone] = useState("");
   const [stateOfPrep, setStateOfPrep] = useState("");
-  const [attempts, setAttempts] = useState<string>("0");
+  const [attempts, setAttempts] = useState("");
 
-  const [err, setErr] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  // Load session + existing profile
+  const isComplete = (p: ProfileRow) => {
+    return (
+      !!(p.full_name && p.full_name.trim()) &&
+      !!(p.phone && p.phone.trim()) &&
+      !!(p.state_of_preparation && p.state_of_preparation.trim()) &&
+      typeof p.upsc_attempts === "number"
+    );
+  };
+
   useEffect(() => {
     let alive = true;
 
-    const run = async () => {
-      setErr(null);
-      setMsg(null);
+    (async () => {
       setLoading(true);
+      setError(null);
 
-      try {
-        const { data } = await supabaseClient.auth.getSession();
-        const session = data.session;
+      // 1) session
+      const { data: s, error: sErr } = await supabaseClient.auth.getSession();
 
-        if (!session) {
-          router.replace(`/login?redirect=/onboarding`);
-          return;
-        }
-
-        const userId = session.user.id;
-        const userEmail = session.user.email ?? "";
-        if (alive) setEmail(userEmail);
-
-        const { data: profile, error } = await supabaseClient
-          .from("profiles")
-          .select("id, email, full_name, phone, state_of_preparation, upsc_attempts")
-          .eq("id", userId)
-          .maybeSingle();
-
-        if (error) throw error;
-
-        // If profile exists and seems complete, send user onwards
-        if (profile) {
-          const p = profile as ProfileRow;
-
-          const complete =
-            !!(p.full_name && p.full_name.trim()) &&
-            !!(p.phone && p.phone.trim()) &&
-            !!(p.state_of_preparation && p.state_of_preparation.trim()) &&
-            typeof p.upsc_attempts === "number";
-
-          if (complete) {
-            router.replace(redirectTo);
-            return;
-          }
-
-          // Pre-fill whatever exists
-          if (alive) {
-            setFullName(p.full_name ?? "");
-            setPhone(p.phone ?? "");
-            setStateOfPrep(p.state_of_preparation ?? "");
-            setAttempts(
-              typeof p.upsc_attempts === "number" ? String(p.upsc_attempts) : "0"
-            );
-          }
-        }
-      } catch (e: any) {
-        setErr(e?.message ?? "Failed to load onboarding.");
-      } finally {
-        if (alive) setLoading(false);
+      // If you have bad/stale tokens in localStorage, Supabase can throw:
+      // "Invalid Refresh Token: Refresh Token Not Found"
+      if (sErr) {
+        // clean out broken auth state and go to login
+        try {
+          await supabaseClient.auth.signOut();
+        } catch {}
+        if (alive) router.replace(`/login?redirectTo=${encodeURIComponent(redirectTo)}`);
+        return;
       }
-    };
 
-    run();
+      const session = s.session;
+      if (!session?.user) {
+        if (alive) router.replace(`/login?redirectTo=${encodeURIComponent(redirectTo)}`);
+        return;
+      }
+
+      const userId = session.user.id;
+      const userEmail = session.user.email ?? "";
+      if (alive) setEmail(userEmail);
+
+      // 2) load profile
+      const { data: prof, error: pErr } = await supabaseClient
+        .from("profiles")
+        .select("id,email,full_name,phone,state_of_preparation,upsc_attempts,onboarded,is_pro")
+        .eq("id", userId)
+        .maybeSingle();
+
+      if (pErr) {
+        if (alive) {
+          setError(pErr.message);
+          setLoading(false);
+        }
+        return;
+      }
+
+      // 3) If already complete => go onwards
+      if (prof && isComplete(prof as ProfileRow)) {
+        if (alive) router.replace(redirectTo);
+        return;
+      }
+
+      // 4) Prefill form if profile exists but incomplete
+      if (alive) {
+        const row = (prof as ProfileRow) ?? null;
+        setProfile(row);
+
+        setFullName(row?.full_name ?? "");
+        setPhone(row?.phone ?? "");
+        setStateOfPrep(row?.state_of_preparation ?? "");
+        setAttempts(
+          typeof row?.upsc_attempts === "number" ? String(row.upsc_attempts) : ""
+        );
+
+        setLoading(false);
+      }
+    })();
 
     return () => {
       alive = false;
@@ -103,50 +118,45 @@ export default function OnboardingClient({ redirectTo }: Props) {
   }, [router, redirectTo]);
 
   const onSave = async () => {
-    setErr(null);
-    setMsg(null);
-
-    if (!fullName.trim()) return setErr("Full name is required.");
-    if (!phone.trim()) return setErr("Phone is required.");
-    if (!stateOfPrep.trim()) return setErr("State of preparation is required.");
+    setError(null);
 
     const attemptsNum = Number(attempts);
-    if (!Number.isFinite(attemptsNum) || attemptsNum < 0 || attemptsNum > 20) {
-      return setErr("UPSC attempts must be a number between 0 and 20.");
-    }
+    if (!fullName.trim()) return setError("Full name required");
+    if (!phone.trim()) return setError("Phone required");
+    if (!stateOfPrep.trim()) return setError("State of preparation required");
+    if (!Number.isFinite(attemptsNum)) return setError("UPSC attempts must be a number");
 
     setSaving(true);
     try {
-      const { data } = await supabaseClient.auth.getSession();
-      const session = data.session;
-      if (!session) {
-        router.replace(`/login?redirect=/onboarding`);
-        return;
+      const { data: s, error: sErr } = await supabaseClient.auth.getSession();
+      if (sErr || !s.session?.user) {
+        throw new Error("Session expired. Please login again.");
       }
 
-      const userId = session.user.id;
-      const userEmail = session.user.email ?? "";
+      const userId = s.session.user.id;
+      const userEmail = s.session.user.email ?? null;
 
-      const payload = {
-        id: userId,
-        email: userEmail,
-        full_name: fullName.trim(),
-        phone: phone.trim(),
-        state_of_preparation: stateOfPrep.trim(),
-        upsc_attempts: attemptsNum,
-        updated_at: new Date().toISOString(),
-      };
-
-      const { error } = await supabaseClient
+      // Upsert so it works even if profile row wasn't created yet
+      const { error: upErr } = await supabaseClient
         .from("profiles")
-        .upsert(payload, { onConflict: "id" });
+        .upsert(
+          {
+            id: userId,
+            email: userEmail,
+            full_name: fullName.trim(),
+            phone: phone.trim(),
+            state_of_preparation: stateOfPrep.trim(),
+            upsc_attempts: attemptsNum,
+            onboarded: true,
+          },
+          { onConflict: "id" }
+        );
 
-      if (error) throw error;
+      if (upErr) throw upErr;
 
-      setMsg("Saved ✅ Redirecting…");
       router.replace(redirectTo);
     } catch (e: any) {
-      setErr(e?.message ?? "Failed to save profile.");
+      setError(e?.message ?? "Failed to save profile");
     } finally {
       setSaving(false);
     }
@@ -154,104 +164,84 @@ export default function OnboardingClient({ redirectTo }: Props) {
 
   if (loading) {
     return (
-      <main className="min-h-screen bg-slate-950 text-slate-50 px-6 py-10">
-        <div className="max-w-md mx-auto text-sm text-slate-400">
-          Loading onboarding…
-        </div>
-      </main>
+      <div className="min-h-[60vh] flex items-center justify-center text-slate-200">
+        Loading...
+      </div>
     );
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 text-slate-50 px-6 py-10">
-      <div className="max-w-md mx-auto space-y-6">
-        <header>
-          <h1 className="text-2xl font-semibold">Onboarding</h1>
-          <p className="text-sm text-slate-400 mt-1">
-            Add a few details to personalize practice.
-          </p>
-        </header>
+    <div className="mx-auto max-w-xl p-6 text-slate-100">
+      <h1 className="text-2xl font-semibold">Onboarding</h1>
+      <p className="mt-1 text-sm text-slate-300">
+        {email ? `Signed in as ${email}` : "Signed in"}
+      </p>
 
-        <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 space-y-4">
-          <div className="text-xs text-slate-400">
-            Logged in as: <span className="text-slate-200">{email || "—"}</span>
-          </div>
-
-          <label className="block">
-            <span className="text-xs uppercase tracking-wide text-slate-400">
-              Full name
-            </span>
-            <input
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-              className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm"
-              placeholder="Your name"
-            />
-          </label>
-
-          <label className="block">
-            <span className="text-xs uppercase tracking-wide text-slate-400">
-              Phone
-            </span>
-            <input
-              value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm"
-              placeholder="10-digit number"
-            />
-          </label>
-
-          <label className="block">
-            <span className="text-xs uppercase tracking-wide text-slate-400">
-              State of preparation
-            </span>
-            <input
-              value={stateOfPrep}
-              onChange={(e) => setStateOfPrep(e.target.value)}
-              className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm"
-              placeholder="e.g., Delhi / Bihar / Kerala"
-            />
-          </label>
-
-          <label className="block">
-            <span className="text-xs uppercase tracking-wide text-slate-400">
-              UPSC attempts
-            </span>
-            <input
-              value={attempts}
-              onChange={(e) => setAttempts(e.target.value)}
-              className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm"
-              placeholder="0"
-              inputMode="numeric"
-            />
-          </label>
-
-          {err && (
-            <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-sm text-rose-200">
-              {err}
-            </div>
-          )}
-          {msg && (
-            <div className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">
-              {msg}
-            </div>
-          )}
-
-          <button
-            type="button"
-            onClick={onSave}
-            disabled={saving}
-            className="w-full rounded-md bg-emerald-500 px-4 py-2 text-sm font-medium text-slate-950 hover:bg-emerald-400 disabled:opacity-60"
-          >
-            {saving ? "Saving…" : "Save & Continue"}
-          </button>
-
-          <p className="text-xs text-slate-500">
-            Redirect after onboarding:{" "}
-            <span className="text-slate-300">{redirectTo}</span>
-          </p>
+      {error && (
+        <div className="mt-4 rounded-lg border border-rose-700 bg-rose-900/30 p-3 text-sm">
+          {error}
         </div>
+      )}
+
+      <div className="mt-6 space-y-4">
+        <div>
+          <label className="text-sm text-slate-300">Full name</label>
+          <input
+            className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2"
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            placeholder="e.g., Rohit Kumar"
+          />
+        </div>
+
+        <div>
+          <label className="text-sm text-slate-300">Phone</label>
+          <input
+            className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2"
+            value={phone}
+            onChange={(e) => setPhone(e.target.value)}
+            placeholder="e.g., 8529792690"
+          />
+        </div>
+
+        <div>
+          <label className="text-sm text-slate-300">State of preparation</label>
+          <input
+            className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2"
+            value={stateOfPrep}
+            onChange={(e) => setStateOfPrep(e.target.value)}
+            placeholder="e.g., Delhi"
+          />
+        </div>
+
+        <div>
+          <label className="text-sm text-slate-300">UPSC attempts</label>
+          <input
+            className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2"
+            value={attempts}
+            onChange={(e) => setAttempts(e.target.value)}
+            placeholder="e.g., 3"
+            inputMode="numeric"
+          />
+        </div>
+
+        <button
+          onClick={onSave}
+          disabled={saving}
+          className="mt-2 inline-flex items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 font-medium disabled:opacity-60"
+        >
+          {saving ? "Saving..." : "Continue"}
+        </button>
       </div>
-    </main>
+
+      {/* optional debug */}
+      {profile && (
+        <div className="mt-6 text-xs text-slate-400">
+          <div>profile.id: {profile.id}</div>
+          <div>profile.onboarded: {String(profile.onboarded)}</div>
+          <div>profile.is_pro: {String(profile.is_pro)}</div>
+        </div>
+      )}
+    </div>
   );
 }

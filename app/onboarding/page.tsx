@@ -2,19 +2,7 @@
 import { Suspense } from "react";
 import OnboardingClient from "./OnboardingClient";
 
-type Props = {
-  searchParams?: Record<string, string | string[] | undefined>;
-};
-
-function pickRedirect(searchParams?: Props["searchParams"]) {
-  const raw = searchParams?.redirect;
-  const r = Array.isArray(raw) ? raw[0] : raw;
-  return r && r.startsWith("/") ? r : "/practice";
-}
-
-export default function OnboardingPage({ searchParams }: Props) {
-  const redirectTo = pickRedirect(searchParams);
-
+export default function OnboardingPage() {
   return (
     <Suspense
       fallback={
@@ -25,7 +13,7 @@ export default function OnboardingPage({ searchParams }: Props) {
         </main>
       }
     >
-      <OnboardingClient redirectTo={redirectTo} />
+      <OnboardingClient />
     </Suspense>
   );
 }
