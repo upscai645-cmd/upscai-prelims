@@ -939,7 +939,7 @@ export default function PracticePage() {
         {/* AI analysis */}
         {analysis && (
           <section className="space-y-3">
-            <AnalysisTabs analysis={analysis} analysisUpdatedAt={analysisUpdatedAt} difficulty={question?.difficulty} />
+            <AnalysisTabs analysis={analysis} analysisUpdatedAt={analysisUpdatedAt} difficulty={question?.difficulty ?? undefined} />
             <div className="rounded-2xl border border-slate-800 bg-slate-900/60 p-4 flex items-center justify-between gap-3">
               <div>
                 <div className="text-sm font-semibold text-slate-100">
