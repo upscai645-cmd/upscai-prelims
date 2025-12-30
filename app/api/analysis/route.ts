@@ -1,7 +1,5 @@
 // app/api/analysis/route.ts
 import { NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
 import { createClient } from "@supabase/supabase-js";
 import { supabaseServerClient } from "@/lib/supabaseServer";
 import { generateQuestionAnalysis } from "@/lib/generateQuestionAnalysis";
